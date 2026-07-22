@@ -1,0 +1,8 @@
+# Cmake build output
+build/
+
+# macOS files
+.DS_store
+
+# VS code local config
+.vscode/

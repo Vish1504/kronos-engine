@@ -12,4 +12,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_executable(
     kronos
     src/main.cpp
+    src/logger.cpp
+)
+
+target_include_directories(
+    kronos
+    PRIVATE
+    include
 )

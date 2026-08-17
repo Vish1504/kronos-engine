@@ -2,6 +2,7 @@
 #include<fstream>
 #include <kronos/logger.hpp>
 #include <stdexcept>
+#include <mutex>
 #include <chrono>
 #include<iomanip>
 #include <ctime>
@@ -42,6 +43,7 @@ void kronos::Logger::error(const std::string& message){
 }
 
 void kronos::Logger::logFunc(const std::string& level, const std::string& message){
+    std::lock_guard<std::mutex> lock(mutex_); //mutex + RAII
 
     auto nowObj=std::chrono::system_clock::now(); //nowObj is a complex object representing a point in time
     std::time_t legacy_time = std::chrono::system_clock::to_time_t(nowObj);// Convert to time_t (seconds since epoch)

@@ -3,11 +3,13 @@
 #include<string>
 #include <filesystem>
 #include<fstream>
+#include<mutex>
 
 namespace kronos {
     class Logger{
         private:
             std::ofstream file_;
+            std::mutex mutex_; //To facilitate concurrent writes
             void logFunc(
                 const std::string& level, 
                 const std::string& message

@@ -1,14 +1,21 @@
 #include<iostream>
 #include <kronos/logger.hpp>
+#include <kronos/config.hpp>
 
 int main(){
     // std::cout<<"Kronos Engine";
 
-    kronos::Logger loggerObj("logs/kronos.log");
 
-    loggerObj.info("Starting Kronos 2");
-    loggerObj.warn("Test warning 2");
-    loggerObj.error("Test error 2");
+
+    kronos::Config configObj("config/kronos.config");
+    std::cout<<"Mem table size= "<<configObj.getMemtableSize();
+    std::cout << std::boolalpha<< "\nBloom filter status = "<<configObj.getBloomFilterEnabled();
+    std::cout<<"\nLog path= "<<configObj.getLogPath();
+    
+    kronos::Logger loggerObj(configObj.getLogPath());
+    loggerObj.info("Testing info here");
+
+
 
     
 

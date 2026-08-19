@@ -13,6 +13,7 @@ add_executable(
     kronos
     src/main.cpp
     src/logger.cpp
+    src/config.cpp
 )
 
 target_include_directories(

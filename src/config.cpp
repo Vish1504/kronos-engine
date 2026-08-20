@@ -31,7 +31,8 @@ kronos::Config::Config(const std::filesystem::path &configPath) {
 int kronos::Config::getMemtableSize() {
   // To check if memtable_size_mb exists on the config file
   if (!configurations_.contains("memtable_size_mb")) {
-    throw std::runtime_error("Missing configuration: memtable_size_mb");
+    throw std::runtime_error(
+        "memtable_size_mb key is missing in your config file");
   }
   std::string value = configurations_.at("memtable_size_mb");
 
@@ -51,7 +52,7 @@ int kronos::Config::getMemtableSize() {
 bool kronos::Config::getBloomFilterEnabled() {
 
   if (!configurations_.contains("bloom_filter")) {
-    throw std::runtime_error("Missing configuration: bloom_filter");
+    throw std::runtime_error("bloom_filter key is missing in your config file");
   }
   std::string value = configurations_.at("bloom_filter");
   if (value == "true") {
@@ -65,7 +66,13 @@ bool kronos::Config::getBloomFilterEnabled() {
 }
 
 std::string kronos::Config::getLogPath() {
+  if (!configurations_.contains("log_path")) {
+    throw std::runtime_error("log_path key is missing in your config file");
+  }
+
   std::string value = configurations_.at("log_path");
+  if (value.empty()) {
+    throw std::runtime_error("log_path cannot be empty");
+  }
   return value;
-  throw std::runtime_error("Configuration error: 'logPath' key is missing.\n");
 }

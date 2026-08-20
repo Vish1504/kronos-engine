@@ -2,7 +2,16 @@
 #include <iostream>
 #include <kronos/config.hpp>
 #include <stdexcept>
+std::string trim(const std::string &str) {
+  auto first = str.find_first_not_of(" \t");
+  auto last = str.find_last_not_of(" \t");
 
+  if (first == std::string::npos) {
+    return "";
+  }
+
+  return str.substr(first, last - first + 1);
+}
 kronos::Config::Config(const std::filesystem::path &configPath) {
 
   std::ifstream file(configPath); // Open the configuration file for reading.
@@ -16,14 +25,21 @@ kronos::Config::Config(const std::filesystem::path &configPath) {
 
   // Read line by line
   while (std::getline(file, line)) {
+    line = trim(line);
+    if (line.empty()) { // incase of blankline
+      continue;
+    }
     // add it to unordered map
     auto delimiterPos = line.find('=');
 
     if (delimiterPos == std::string::npos) {
       throw std::runtime_error("Missing '=' ");
     }
-    std::string key = line.substr(0, delimiterPos);
-    std::string value = line.substr(delimiterPos + 1);
+    std::string key = trim(line.substr(0, delimiterPos));
+    // if (key.empty()) {
+    //   throw std::runtime_error("Configuration key cannot be empty");
+    // }
+    std::string value = trim(line.substr(delimiterPos + 1));
     configurations_[key] = value;
   }
 }

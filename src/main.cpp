@@ -10,7 +10,7 @@ int main(){
 try
     {
     kronos::Config configObj("config/kronos.config");
-    
+
     std::cout<<"\nMem table size= "<<configObj.getMemtableSize();
 
     std::cout << std::boolalpha<< "\nBloom filter status = "<<configObj.getBloomFilterEnabled();
@@ -22,7 +22,7 @@ try
 
     }
     catch(const std::exception& error){ //Catch exceptions by const reference to preserve the original exception.
-        std::cerr<<"Kronos startup failed "<<error.what()<<"\n";
+        std::cerr<<"Kronos startup failed - "<<error.what()<<"\n";
     }
 
 

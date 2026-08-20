@@ -49,6 +49,10 @@ int kronos::Config::getMemtableSize() {
 }
 
 bool kronos::Config::getBloomFilterEnabled() {
+
+  if (!configurations_.contains("bloom_filter")) {
+    throw std::runtime_error("Missing configuration: bloom_filter");
+  }
   std::string value = configurations_.at("bloom_filter");
   if (value == "true") {
     return true;

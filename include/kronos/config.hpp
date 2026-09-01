@@ -5,8 +5,7 @@
 #include<filesystem>
 
 
-namespace kronos {
-    class Config{
+c
         private:
             std::unordered_map<std::string, std::string> configurations_ ;
         

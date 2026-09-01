@@ -5,6 +5,7 @@
 #include <limits>
 #include <stdexcept>
 #include <vector>
+#include <zlib.h> //for crc32
 
 /*
   WAL (Write-Ahead Log) notes
@@ -30,7 +31,7 @@
     Value Length -> uint32_t (4 bytes)
     Key          -> string variable
     Value        -> string variable
-    CRC32        -> uint32_t (4 bytes) [to be implemented]
+    CRC32        -> uint32_t (4 bytes) 
 
   V1 currently serializes integers using the host machine's native byte order.
   A fixed byte order can be introduced later for cross-platform portability.
@@ -92,7 +93,8 @@ kronos::Wal::Wal(const std::filesystem::path &pathWal) {
 template <typename T>
 void appendBytes(std::vector<uint8_t> &record, const T &value) {
 
-  // we need to view "value" as individual bytes and append all its bytes to the serialized WAL record
+  // we need to view "value" as individual bytes and append all its bytes to the
+  // serialized WAL record
   const uint8_t *valueInBytes = reinterpret_cast<const uint8_t *>(&value);
 
   record.insert(record.end(),                // WHERE should I insert?
@@ -120,7 +122,8 @@ void kronos::Wal::put(const std::string &key, const std::string &value) {
   uint32_t keyLength = static_cast<uint32_t>(key.size());
   uint32_t valueLength = static_cast<uint32_t>(value.size());
 
-  /* We’re assembling the serialized WAL record using a temporary RAM buffer bu so that we can run CRC32 over those exact bytes. */
+  /* We’re assembling the serialized WAL record using a temporary RAM buffer bu
+   * so that we can run CRC32 over those exact bytes. */
   std::vector<uint8_t> record;
 
   appendBytes(record, sequence);
@@ -133,4 +136,29 @@ void kronos::Wal::put(const std::string &key, const std::string &value) {
   for (char c : value) {
     record.push_back(static_cast<uint8_t>(c));
   }
+
+  // Now we calculate CRC32 over these exact serialized bytes.
+  // Initialize the CRC register
+  uLong crc = crc32(0L, Z_NULL, 0);
+
+  // Compute the checksum over the current contents of record [R].
+  crc = crc32(crc, reinterpret_cast<const Bytef *>(record.data()), record.size());
+
+// Connverting checksum to uint32_t as zlib returns the checksum as uLong.
+  uint32_t checksum_value = static_cast<uint32_t>(crc);
+
+// Final layout: [Sequence][Operation][Key Length][Value Length][Key][Value][CRC32]  
+// Append the 4 checksum bytes to the serialized record [R]
+  appendBytes(record, checksum_value);
+
+  file_.write(
+    reinterpret_cast<const char *>(record.data()),
+    record.size()
+);
+
+if (!file_) {
+    throw std::runtime_error("Failed to write record to WAL");
+}
+
+
 }

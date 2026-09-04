@@ -8,16 +8,26 @@ project(KronosEngine)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+find_package(ZLIB REQUIRED)
+
 # Build an executable named kronos from these source files
 add_executable(
     kronos
     src/main.cpp
     src/logger.cpp
     src/config.cpp
+    src/wal.cpp
 )
 
 target_include_directories(
     kronos
     PRIVATE
     include
+    
+)
+
+target_link_libraries(
+    kronos
+    PRIVATE
+    ZLIB::ZLIB
 )

@@ -1,8 +1,15 @@
-# Cmake build output
+# CMake build output
 build/
 
 # macOS files
-.DS_store
+.DS_Store
 
-# VS code local config
+# VS Code local config
 .vscode/
+
+# Generated WAL files
+tests/test.wal
+tests/test.wal.backup
+
+# Runtime logs
+logs/*.log

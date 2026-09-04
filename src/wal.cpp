@@ -18,9 +18,9 @@ namespace fs = std::filesystem;
 /*
   WAL (Write-Ahead Log) notes
   ---------------------
-  The WAL provides durability for Chronos writes.
+  The WAL provides durability for Kronos writes.
   A written record must first be recorded durably in the WAL [D], and then later
-  added to Memtable [R]. If Chronos crashes and the Memtable is lost, the WAL
+  added to Memtable [R]. If Kronos crashes and the Memtable is lost, the WAL
   can later be replayed to reconstruct the lost in-memory state.
 
   WAL file layout:
@@ -43,43 +43,24 @@ namespace fs = std::filesystem;
 
   V1 currently serializes integers using the host machine's native byte order.
   A fixed byte order can be introduced later for cross-platform portability.
+
+  The first WAL implementation used std::fstream.
+  So I later moved to POSIX I/O because Kronos needed fsync() for an explicit
+  durability boundary.
+
  */
 
 kronos::Wal::Wal(const std::filesystem::path &pathWal) {
   bool isNewFile = !fs::exists(pathWal); // Check existence first
-
-  //   if (isNewFile) {
-  //     /* We're creating an empty file first, because a new WALstd::fstream
-  //     opened with both ios::in and ios::out expects the file to already exist
-  //     */ std::ofstream create_file(pathWal, std::ios::binary |
-  //     std::ios::out);
-  //   } // create_file is automatically closed here (RAII).
-
   /* Here we open the WAL for both reading (needed for validation/recovery) and
   writing (needed for appending new records).*/
   //   file_.open(pathWal, std::ios::binary | std::ios::out | std::ios::in);
 
   fd_ = ::open(pathWal.c_str(), O_RDWR | O_CREAT, 0644);
 
-  //   if (!file_.is_open()) {
-  //     throw std::runtime_error("Failed to open WAL file");
-  //   }
-
   if ((fd_) == -1) {
     throw std::runtime_error("Failed to open WAL file");
   }
-
-  //   if (isNewFile) {
-  //     // Every new WAL begins with magic bytes
-  //     file_.write(magic_, sizeof(magic_));
-  //     /* since version_ is of type uint8_t, and .write() allows only const
-  //     char*,
-  //      * we use reinterpret_cast to let it view version_'s memory as bytes.
-  //      There
-  //      * will be no change to the value. */
-  //     file_.write(reinterpret_cast<const char *>(&version_),
-  //     sizeof(version_));
-  //   }
 
   if (isNewFile) {
     if (::write(fd_, magic_, sizeof(magic_)) != sizeof(magic_)) {
@@ -99,9 +80,11 @@ kronos::Wal::Wal(const std::filesystem::path &pathWal) {
       throw std::runtime_error("Failed to seek WAL");
     }
 
-    /* We have to check if all 4 magic bytes were read, else if there were only
-     2 magicRead bytes, and magicRead assigned garbage values to the remaining
-     2 bytes, that can be an issue for rare scenarios. */
+    /*
+        We must read all four magic bytes before comparing them.
+        A shorter read means the WAL header is incomplete or invalid.
+        */
+
     // if (!file_) {
     //   throw std::runtime_error("Failed to read WAL magic");
     // }
@@ -183,20 +166,16 @@ void kronos::Wal::put(const std::string &key, const std::string &value) {
   crc =
       crc32(crc, reinterpret_cast<const Bytef *>(record.data()), record.size());
 
-  // Connverting checksum to uint32_t as zlib returns the checksum as uLong.
+  // Converting checksum to uint32_t as zlib returns the checksum as uLong.
   uint32_t checksum_value = static_cast<uint32_t>(crc);
 
-  // Final layout: [Sequence][Operation][Key Length][Value
-  // Length][Key][Value][CRC32] Append the 4 checksum bytes to the serialized
-  // record [R]
+  /* Final layout:
+  [Sequence][Operation][Key Length][Value Length][Key][Value][CRC32]
+     */
+
+  // Append the 4 checksum bytes to the serialized record [R]
   appendBytes(record, checksum_value);
 
-  //   file_.write(reinterpret_cast<const char *>(record.data()),
-  //   record.size());
-
-  //   if (!file_) {
-  //     throw std::runtime_error("Failed to write record to WAL");
-  //   }
   size_t totalWritten = 0;
 
   while (totalWritten < record.size()) {
@@ -230,25 +209,6 @@ kronos::Wal::~Wal() {
   }
 }
 
-// std::vector<recoveredRecord> recover() {
-//   ::lseek(fd_, sizeof(magic_) + sizeof(version_), SEEK_SET);
-//   if (::lseek(fd_, sizeof(magic_) + sizeof(version_), SEEK_SET) == -1) {
-//     throw std::runtime_error("Failed to seek WAL for recovery");
-//   }
-
-//   uint64_t sequence;
-//   //Take the next 8 bytes from WAL [D] and copy them into the 8 bytes of RAM
-//   [R] occupied by sequence. ssize_t bytes_read = ::read(
-//       fd_,             // which file?
-//       &sequence,       // where in RAM [R] should the bytes go?
-//       sizeof(sequence) // The maximum number of bytes to read into the
-//       buffer.
-//   )
-
-//   if (bytesRead == 0) {
-//     return records;
-// }
-
 // //corrupted record
 // /*  - keep all previously recovered records
 //     - truncate WAL [D] back to the start of this incomplete record
@@ -257,22 +217,26 @@ kronos::Wal::~Wal() {
 // }
 
 /*
-                        Recovery notes
-                        --------------
-                        Now imagine Kronos crashes. Everything in the Memtable
-   [R] will eventually disappear because it's in the RAM. When Chronos starts
-   again, all it has is this file: WAL[D] Recovery policy:
-                        1. Clean EOF between records:
-                            recovery succeeds.
-                        2. EOF in the middle of the final record:
-                            keep previously valid records,
-                            truncate the incomplete tail,
-                            fsync the repair,
-                            recovery succeeds.
-                        3. CRC mismatch / invalid operation:
-                            treat it as genuine corruption,
-                            do NOT truncate automatically,
-                            fail recovery.
+  Recovery notes
+  --------------
+  Now imagine Kronos crashes. Everything in the Memtable[R] will eventually
+  disappear because it's in the RAM. When Kronos starts again, all it has is
+  this file: WAL[D]
+
+   Recovery policy:
+  1. Clean EOF between records:
+     Recovery succeeds.
+
+  2. EOF in the middle of the final record:
+     Keep previously valid records,
+     truncate the incomplete tail,
+     fsync the repair,
+     and finish recovery successfully.
+
+  3. CRC mismatch / invalid operation:
+     Treat it as genuine corruption,
+     do NOT truncate automatically,
+     and fail recovery.
 */
 
 // This function exists because a read function does not guaranntee you get all
@@ -280,11 +244,9 @@ kronos::Wal::~Wal() {
 size_t kronos::Wal::readUpTo(void *buffer, size_t bytesToRead) {
   size_t totalRead = 0;
 
-  // Take the destination buffer as raw bytes so we can advance through it byte
-  // by byte.
-  uint8_t *bytes = static_cast<uint8_t *>(
-      buffer); // this will point to the address of the first block of 8-bit
-               // buffer (also called as bytes now)
+  // We will consider the destination buffer as raw bytes so we can advance
+  // through it byte by byte.
+  uint8_t *bytes = static_cast<uint8_t *>(buffer);
 
   while (totalRead < bytesToRead) {
     ssize_t result = ::read(fd_, bytes + totalRead, bytesToRead - totalRead);

@@ -53,10 +53,10 @@ public:
     Iterator(std::map<std::string, Entry>::const_iterator current,
              std::map<std::string, Entry>::const_iterator end)
         : it_curr(current), it_end(end){};
-    bool valid() const;      // to check if current != end
-    std::string key() const; // to return key at current point
-    Entry entry() const;     // to return entry at current point
-    void next();             // go to next key
+    bool valid() const;             // to check if current != end
+    const std::string &key() const; // to return key at current point
+    const Entry &entry() const;     // to return entry at current point
+    void next();                    // go to next key
 
   private:
     std::map<std::string, Entry>::const_iterator

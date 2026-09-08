@@ -17,6 +17,7 @@ add_executable(
     src/logger.cpp
     src/config.cpp
     src/wal.cpp
+    src/memtable.cpp
 )
 
 target_include_directories(
@@ -30,4 +31,16 @@ target_link_libraries(
     kronos
     PRIVATE
     ZLIB::ZLIB
+)
+
+add_executable(
+    memtable_test
+    tests/memtable_test.cpp
+    src/memtable.cpp
+)
+
+target_include_directories(
+    memtable_test
+    PRIVATE
+    include
 )

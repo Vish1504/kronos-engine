@@ -16,7 +16,7 @@ public:
     std::string key;
     std::string value;
   };
-   explicit Wal(const std::filesystem::path &pathWal);
+  explicit Wal(const std::filesystem::path &pathWal);
   ~Wal();
   void put(const std::string &key, const std::string &value);
   std::vector<RecoveredRecord> recover();

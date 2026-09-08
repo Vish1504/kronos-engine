@@ -48,6 +48,22 @@ public:
   bool would_exceed_target(const std::string &key,
                            const Entry &new_entry)
       const; // if true, freeze current Memtable and create new active Memtable
+  class Iterator {
+  public:
+    Iterator(std::map<std::string, Entry>::const_iterator current,
+             std::map<std::string, Entry>::const_iterator end)
+        : it_curr(current), it_end(end){};
+    bool valid() const;      // to check if current != end
+    std::string key() const; // to return key at current point
+    Entry entry() const;     // to return entry at current point
+    void next();             // go to next key
+
+  private:
+    std::map<std::string, Entry>::const_iterator
+        it_curr; // current read only iterator
+    std::map<std::string, Entry>::const_iterator it_end; // end iterator
+  };
+  Iterator getIterator() const;
 
 private:
   std::map<std::string, Entry> Mtable_;

@@ -128,11 +128,35 @@ kronos::Memtable::MemTableState kronos::Memtable::GetState() const {
   return state_;
 }
 
-bool kronos::Memtable::freeze(){
-  if(state_==MemTableState::MUTABLE){
-    state_=MemTableState::IMMUTABLE;
+bool kronos::Memtable::freeze() {
+  if (state_ == MemTableState::MUTABLE) {
+    state_ = MemTableState::IMMUTABLE;
     return true;
   }
 
   return false;
+}
+
+bool kronos::Memtable::Iterator::valid() const {
+  if (it_curr == it_end) {
+    return false;
+  }
+  return true;
+}
+
+const std::string &kronos::Memtable::Iterator::key() const {
+  return it_curr->first;
+}
+const kronos::Memtable::Entry &kronos::Memtable::Iterator::entry() const {
+  return it_curr->second;
+}
+
+void kronos::Memtable::Iterator::next() {
+  if (it_curr != it_end) {
+    it_curr++;
+  }
+}
+
+kronos::Memtable::Iterator kronos::Memtable::getIterator() const {
+  return Iterator(Mtable_.cbegin(), Mtable_.cend());
 }

@@ -41,7 +41,7 @@ public:
                   uint64_t sequence);
   WriteResult remove(const std::string &key, uint64_t sequence);
   GetResult get(const std::string &key) const; // Read only
-  size_t getSize() const;
+  size_t entry_count() const; // for total count of enteries on the memtable
   size_t getMemory_usage() const;
   MemTableState GetState() const;
   bool freeze();

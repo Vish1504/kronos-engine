@@ -44,3 +44,22 @@ target_include_directories(
     PRIVATE
     include
 )
+
+add_executable(
+    wal_memtable_test
+    tests/wal_memtable_test.cpp
+    src/wal.cpp
+    src/memtable.cpp
+)
+
+target_include_directories(
+    wal_memtable_test
+    PRIVATE
+    include
+)
+
+target_link_libraries(
+    wal_memtable_test
+    PRIVATE
+    ZLIB::ZLIB
+)

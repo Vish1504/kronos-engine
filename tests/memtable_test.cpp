@@ -7,14 +7,14 @@
 void test_put_and_get() {
   kronos::Memtable memtable(1024);
 
-  auto result = memtable.put("name", "Krishna", 1);
+  auto result = memtable.put("name", "Harry", 1);
 
   assert(result == kronos::Memtable::WriteResult::SUCCESS);
 
   auto get_result = memtable.get("name");
 
   assert(get_result.status == kronos::Memtable::GetStatus::FOUND);
-  assert(get_result.value == "Krishna");
+  assert(get_result.value == "Harry");
   assert(memtable.entry_count() == 1);
   assert(memtable.getMemory_usage() > 0);
 
@@ -24,7 +24,7 @@ void test_put_and_get() {
 void test_newer_sequence_overwrites() {
   kronos::Memtable memtable(1024);
 
-  memtable.put("name", "Krishna", 1);
+  memtable.put("name", "Harry", 1);
 
   auto result = memtable.put("name", "Vishnu", 2);
 
@@ -44,7 +44,7 @@ void test_newer_sequence_overwrites() {
 void test_older_and_equal_sequences_are_rejected() {
   kronos::Memtable memtable(1024);
 
-  memtable.put("name", "Krishna", 10);
+  memtable.put("name", "Harry", 10);
 
   auto older_result = memtable.put("name", "Old Value", 9);
 
@@ -58,7 +58,7 @@ void test_older_and_equal_sequences_are_rejected() {
   auto get_result = memtable.get("name");
 
   assert(get_result.status == kronos::Memtable::GetStatus::FOUND);
-  assert(get_result.value == "Krishna");
+  assert(get_result.value == "Harry");
 
   std::cout << "PASS: older/equal sequences rejected\n";
 }
@@ -66,7 +66,7 @@ void test_older_and_equal_sequences_are_rejected() {
 void test_remove_creates_tombstone() {
   kronos::Memtable memtable(1024);
 
-  memtable.put("name", "Krishna", 1);
+  memtable.put("name", "Harry", 1);
 
   auto result = memtable.remove("name", 2);
 
@@ -110,7 +110,7 @@ void test_not_found() {
 void test_freeze() {
   kronos::Memtable memtable(1024);
 
-  memtable.put("name", "Krishna", 1);
+  memtable.put("name", "Harry", 1);
 
   assert(memtable.GetState() == kronos::Memtable::MemTableState::MUTABLE);
 
@@ -134,7 +134,7 @@ void test_freeze() {
   auto get_result = memtable.get("name");
 
   assert(get_result.status == kronos::Memtable::GetStatus::FOUND);
-  assert(get_result.value == "Krishna");
+  assert(get_result.value == "Harry");
 
   std::cout << "PASS: freeze\n";
 }

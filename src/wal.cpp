@@ -124,12 +124,21 @@ void appendBytes(std::vector<uint8_t> &record, const T &value) {
   );
 }
 
-void kronos::Wal::put(const std::string &key, const std::string &value) {
+uint64_t kronos::Wal::put(const std::string &key, const std::string &value) {
+  return writeRecord(Operation::PUT, key, value);
+}
+
+uint64_t kronos::Wal::remove(const std::string &key) {
+  return writeRecord(Operation::DELETE, key, "");
+}
+
+uint64_t kronos::Wal::writeRecord(Operation operation, const std::string &key,
+                                  const std::string &value) {
+
   // Here we build the serialized representation of: [Sequence][PUT][Key
   // Length][Value Length][Key][Value]
 
   uint64_t sequence = next_sequence_;
-  Operation op = Operation::PUT;
 
   // .size() returns type size_t, which is 64-bit on a 64 bit machine
   /* Our WAL format stores lengths as uint32_t (4 bytes), so verify the sizes
@@ -148,7 +157,7 @@ void kronos::Wal::put(const std::string &key, const std::string &value) {
   std::vector<uint8_t> record;
 
   appendBytes(record, sequence);
-  appendBytes(record, op);
+  appendBytes(record, operation);
   appendBytes(record, keyLength);
   appendBytes(record, valueLength);
   for (char c : key) {
@@ -201,6 +210,7 @@ void kronos::Wal::put(const std::string &key, const std::string &value) {
   }
 
   next_sequence_++;
+  return sequence;
 }
 
 kronos::Wal::~Wal() {

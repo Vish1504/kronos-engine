@@ -18,7 +18,8 @@ public:
   };
   explicit Wal(const std::filesystem::path &pathWal);
   ~Wal();
-  void put(const std::string &key, const std::string &value);
+  uint64_t put(const std::string &key, const std::string &value);
+  uint64_t remove(const std::string &key);
   std::vector<RecoveredRecord> recover();
 
 private:
@@ -30,5 +31,7 @@ private:
   uint64_t next_sequence_ = 0;
   int fd_ = -1;
   size_t readUpTo(void *buffer, size_t bytesToRead);
+  uint64_t writeRecord(Operation operation, const std::string &key,
+                       const std::string &value);
 };
 } // namespace kronos

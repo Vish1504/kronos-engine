@@ -10,6 +10,19 @@ template <typename T> void encode_to_le(uint8_t arr[], T value) {
     arr[i] = static_cast<uint8_t>((value >> (8 * i)) & 0xFF);
   }
 }
+void write_all(int fd, const uint8_t *data, size_t size) {
+  size_t written = 0;
+
+  while (written < size) {
+    ssize_t result = ::write(fd, data + written, size - written);
+
+    if (result <= 0) {
+      throw std::runtime_error("Failed to write SSTable data");
+    }
+
+    written += static_cast<size_t>(result);
+  }
+}
 
 kronos::SstableBuilder::SstableBuilder(const std::filesystem::path &path,
                                        size_t blockSize) {
@@ -46,21 +59,14 @@ kronos::SstableBuilder::~SstableBuilder() {
 }
 
 void kronos::SstableBuilder::writeHeader() {
-  if (::write(fd_, sstable_magic_, sizeof(sstable_magic_)) !=
-      sizeof(sstable_magic_)) {
-    throw std::runtime_error("Failed to write SSTable magic");
-  }
+  write_all(fd_, sstable_magic_, sizeof(sstable_magic_));
 
   uint32_t version = 1;
-  // Little Endian
+
   uint8_t version_bytes[4];
   encode_to_le(version_bytes, version);
 
-  // Endianness only applies to single numeric values that span multiple bytes
-  if (::write(fd_, version_bytes, sizeof(version_bytes)) !=
-      sizeof(version_bytes)) {
-    throw std::runtime_error("Failed to write SSTable version");
-  }
+  write_all(fd_, version_bytes, sizeof(version_bytes));
 }
 
 void kronos::SstableBuilder::add(std::string key, InternalEntry e) {
@@ -110,4 +116,64 @@ void kronos::SstableBuilder::add(std::string key, InternalEntry e) {
   currentBlock_recordCount_++;
 }
 
-void kronos::SstableBuilder::flushCurrentBlock() {}
+void kronos::SstableBuilder::flushCurrentBlock() {
+  if (current_block_.size() == 0) {
+    return;
+  }
+
+  // Get current position
+  off_t current_pos = lseek(fd_, 0, SEEK_CUR);
+  if (current_pos == (off_t)-1) {
+    throw std::runtime_error("Error getting position");
+  }
+  uint64_t block_offset = static_cast<uint64_t>(current_pos);
+
+  uint32_t currentBlock_recordCount_32 =
+      static_cast<uint32_t>(currentBlock_recordCount_);
+  uint8_t currentBlock_recordCount_bytes[4];
+  encode_to_le(currentBlock_recordCount_bytes, currentBlock_recordCount_32);
+
+  // Now we calculate CRC32 over [record_count][records]
+  // Initialize the CRC register
+  uLong crc = crc32(0L, Z_NULL, 0);
+
+  // Update CRC with the block's record count.
+  crc = crc32(crc,
+              reinterpret_cast<const Bytef *>(currentBlock_recordCount_bytes),
+              sizeof(currentBlock_recordCount_bytes));
+
+  // Update CRC with all serialized records in the block.
+  crc = crc32(crc, reinterpret_cast<const Bytef *>(current_block_.data()),
+              static_cast<uInt>(current_block_.size()));
+
+  // Converting checksum to uint32_t as zlib returns the checksum as uLong.
+  uint32_t checksum_value = static_cast<uint32_t>(crc);
+  uint8_t checksum_bytes[4];
+  encode_to_le(checksum_bytes, checksum_value);
+  /* Final layout for a block:
+    [record_count - 4 bytes][serialized records][CRC32 - 4 bytes]
+       */
+  write_all(fd_, currentBlock_recordCount_bytes,
+            sizeof(currentBlock_recordCount_bytes));
+
+  write_all(fd_, current_block_.data(), current_block_.size());
+
+  write_all(fd_, checksum_bytes, sizeof(checksum_bytes));
+
+  uint32_t block_size =
+      static_cast<uint32_t>(sizeof(currentBlock_recordCount_bytes) +
+                            current_block_.size() + sizeof(checksum_bytes));
+
+  SparseIndexEntry s;
+  s.block_size = block_size;
+  s.block_offset = block_offset;
+  s.firstKey = currentBlock_firstKey_;
+
+  sparse_index_.push_back(s);
+
+  // Old block is safely on disk and indexed.
+  // Now we reuse the buffer for the next block.
+  current_block_.clear();
+  currentBlock_recordCount_ = 0;
+  currentBlock_firstKey_.clear();
+}

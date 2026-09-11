@@ -125,14 +125,14 @@ void appendBytes(std::vector<uint8_t> &record, const T &value) {
 }
 
 uint64_t kronos::Wal::put(const std::string &key, const std::string &value) {
-  return writeRecord(Operation::PUT, key, value);
+  return writeRecord(OperationType::PUT, key, value);
 }
 
 uint64_t kronos::Wal::remove(const std::string &key) {
-  return writeRecord(Operation::DELETE, key, "");
+  return writeRecord(OperationType::DELETE, key, "");
 }
 
-uint64_t kronos::Wal::writeRecord(Operation operation, const std::string &key,
+uint64_t kronos::Wal::writeRecord(OperationType operation, const std::string &key,
                                   const std::string &value) {
 
   // Here we build the serialized representation of: [Sequence][PUT][Key
@@ -373,17 +373,17 @@ std::vector<kronos::Wal::RecoveredRecord> kronos::Wal::recover() {
       break;
     }
 
-    Operation operation;
+    OperationType operation;
 
-    if (operationByte == static_cast<uint8_t>(Operation::PUT)) {
-      operation = Operation::PUT;
-    } else if (operationByte == static_cast<uint8_t>(Operation::DELETE)) {
-      operation = Operation::DELETE;
+    if (operationByte == static_cast<uint8_t>(OperationType::PUT)) {
+      operation = OperationType::PUT;
+    } else if (operationByte == static_cast<uint8_t>(OperationType::DELETE)) {
+      operation = OperationType::DELETE;
     } else {
       // This is not an incomplete write.
-      // The WAL contains an invalid operation value.
+      // The WAL contains an invalid OperationType value.
       /*
-        The byte exists, but it does not represent a valid operation.
+        The byte exists, but it does not represent a valid OperationType.
         This is treated as corruption rather than an incomplete tail.
       */
       throw std::runtime_error("WAL corruption detected: invalid operation");

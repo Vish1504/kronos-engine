@@ -169,7 +169,7 @@ void test_would_exceed_target() {
   kronos::Memtable memtable(512);
 
   kronos::Memtable::Entry huge_entry{std::string(2000, 'x'), 1,
-                                     kronos::Memtable::OperationType::PUT};
+                                     kronos::OperationType::PUT};
 
   assert(memtable.would_exceed_target("large-key", huge_entry));
 

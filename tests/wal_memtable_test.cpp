@@ -41,9 +41,9 @@ int main() {
     // ------------------------------------------------
     for (const auto &record : records) {
 
-      if (record.operation == kronos::Wal::Operation::PUT) {
+      if (record.operation == kronos::OperationType::PUT) {
         memtable.put(record.key, record.value, record.sequence);
-      } else if (record.operation == kronos::Wal::Operation::DELETE) {
+      } else if (record.operation == kronos::OperationType::DELETE) {
         memtable.remove(record.key, record.sequence);
       }
     }

@@ -1,11 +1,12 @@
 #pragma once
+#include "kronos/types.hpp"
 #include <iostream>
 #include <map>
 #include <string>
 namespace kronos {
 class Memtable {
 public:
-  enum class OperationType : uint8_t { DELETE = 0, PUT = 1 };
+  // enum class OperationType : uint8_t { DELETE = 0, PUT = 1 };
   enum class MemTableState : uint8_t {
     IMMUTABLE = 0,
     MUTABLE = 1
@@ -22,12 +23,13 @@ public:
     FOUND = 0,
     DELETED = 1,
     NOT_FOUND = 2
-  };             // What happened when I look for a key?
-  struct Entry { // information sotred for each key
-    std::string value;
-    uint64_t sequence;
-    OperationType operation;
-  };
+  }; // What happened when I look for a key?
+  using Entry = InternalEntry;
+  // struct Entry { // information sotred for each key
+  //   std::string value;
+  //   uint64_t sequence;
+  //   OperationType operation;
+  // };
   struct GetResult {
     std::string value;
     GetStatus status;

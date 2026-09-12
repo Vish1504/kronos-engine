@@ -19,21 +19,18 @@ public:
     // incoming record is older than the version already stored
     OLDER_SEQUENCE = 2
   };
-  enum class GetStatus : uint8_t {
-    FOUND = 0,
-    DELETED = 1,
-    NOT_FOUND = 2
-  }; // What happened when I look for a key?
+
+  using GetStatus = kronos::GetStatus; // from types.hpp
+                                       // What happened when I look for a key?
   using Entry = InternalEntry;
   // struct Entry { // information sotred for each key
   //   std::string value;
   //   uint64_t sequence;
   //   OperationType operation;
   // };
-  struct GetResult {
-    std::string value;
-    GetStatus status;
-  };
+
+  using GetResult = kronos::GetResult; // from types.hpp
+  
   explicit Memtable(size_t target_bytes)
       : memory_usage_(0), target_bytes_(target_bytes),
         state_(MemTableState::MUTABLE){

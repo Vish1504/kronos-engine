@@ -11,15 +11,47 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <zlib.h>
+
+/*
+ * SSTABLE ON-DISK FORMAT
+ *
+ * [ HEADER ]
+ * [ DATA BLOCK 1 ]
+ * [ DATA BLOCK 2 ]
+ * ...
+ * [ SPARSE INDEX ]
+ * [ FOOTER ]
+ *
+ * Writer: C++ objects -> serialized bytes -> disk
+ * Reader: disk -> serialized bytes -> C++ objects
+ *
+ * All multi-byte integers are stored in little-endian format.
+ *
+ * A data block:
+ * [record_count][records...][CRC32]
+ *
+ * Sparse index:
+ * [entry_count][entries...][CRC32]
+ *
+ * Footer:
+ * [index_offset][index_size][CRC32]
+ */
+
 constexpr char sstable_magic_[4] = {'K', 'S', 'S', 'T'};
 constexpr uint32_t version = 1;
 
+// Convert an unsigned integer into little-endian bytes for disk.
 template <typename T> void encode_to_le(uint8_t arr[], T value) {
   static_assert(std::is_unsigned_v<T>);
   for (size_t i = 0; i < sizeof(T); i++) {
     arr[i] = static_cast<uint8_t>((value >> (8 * i)) & 0xFF);
   }
 }
+
+/*
+POSIX write() may write fewer bytes than requested.
+ Keep writing until the entire buffer reaches disk.
+ */
 void write_all(int fd, const void *data, size_t size) {
   const uint8_t *bytes = static_cast<const uint8_t *>(data);
   size_t written = 0;
@@ -46,6 +78,8 @@ void write_all(int fd, const void *data, size_t size) {
 [ FOOTER ]
  */
 
+// Build into a .tmp file so an incomplete SSTable is never mistaken for a
+// successfully finalized table.
 kronos::SstableBuilder::SstableBuilder(const std::filesystem::path &path,
                                        size_t blockSize) {
 
@@ -80,6 +114,7 @@ kronos::SstableBuilder::~SstableBuilder() {
   }
 }
 
+// Identify the file as a Kronos SSTable and record its format version.
 void kronos::SstableBuilder::writeHeader() {
   write_all(fd_, sstable_magic_, sizeof(sstable_magic_));
 
@@ -91,6 +126,8 @@ void kronos::SstableBuilder::writeHeader() {
   write_all(fd_, version_bytes, sizeof(version_bytes));
 }
 
+// Serialize one logical Memtable entry into the SSTable record format.
+// [sequence:8][operation:1][key_len:4][value_len:4][key][value]
 void kronos::SstableBuilder::add(std::string key, InternalEntry e) {
   uint8_t sequence_bytes[8];
   encode_to_le(sequence_bytes, e.sequence);
@@ -103,6 +140,7 @@ void kronos::SstableBuilder::add(std::string key, InternalEntry e) {
   // value length - 64 bit to 32 bit
   uint32_t valueLength = static_cast<uint32_t>(e.value.size());
 
+  // Temporary RAM representation of exactly one serialized record.
   std::vector<uint8_t> record_bytes;
 
   uint8_t key_length_bytes[4];
@@ -141,6 +179,7 @@ void kronos::SstableBuilder::add(std::string key, InternalEntry e) {
   currentBlock_recordCount_++;
 }
 
+// Finalize the current RAM block and append it to the SSTable file.
 void kronos::SstableBuilder::flushCurrentBlock() {
   if (current_block_.size() == 0) {
     return;
@@ -189,6 +228,8 @@ void kronos::SstableBuilder::flushCurrentBlock() {
       static_cast<uint32_t>(sizeof(currentBlock_recordCount_bytes) +
                             current_block_.size() + sizeof(checksum_bytes));
 
+  // Record how the Reader can later locate this block without scanning the
+  // file.
   SparseIndexEntry s;
   s.block_size = block_size;
   s.block_offset = block_offset;
@@ -203,15 +244,22 @@ void kronos::SstableBuilder::flushCurrentBlock() {
   currentBlock_firstKey_.clear();
 }
 
+// Serialize the in-memory sparse index after all data blocks are written.
+//
+// Each entry:
+// [first_key_len][first_key][block_offset][block_size]
 void kronos::SstableBuilder::writeSparseIndex() {
 
   uint32_t entry_count = static_cast<uint32_t>(sparse_index_.size());
   uint8_t entry_count_bytes[4];
   encode_to_le(entry_count_bytes, entry_count);
+
+  // Build the complete serialized index in RAM so we can checksum it once.
   std::vector<uint8_t> index_bytes;
   index_bytes.insert(index_bytes.end(), entry_count_bytes,
                      entry_count_bytes + sizeof(entry_count_bytes));
-  //   serialize
+
+  // Convert each SparseIndexEntry object into its disk representation.
   for (size_t i = 0; i < sparse_index_.size(); i++) {
     // first key length
     uint32_t firstKey_length =
@@ -294,7 +342,11 @@ void kronos::SstableBuilder::writeFooter(uint64_t index_offset,
   write_all(fd_, footer_checksum_bytes, sizeof(footer_checksum_bytes));
 }
 
+// Finalize the SSTable in strict order:
+// final block -> sparse index -> footer -> fsync -> rename .tmp to .sst
 void kronos::SstableBuilder::finish() {
+
+  // add() may have left one partially filled block in RAM.
   flushCurrentBlock();
 
   off_t index_offset_pos = ::lseek(fd_, 0, SEEK_CUR);
@@ -331,6 +383,7 @@ void kronos::SstableBuilder::finish() {
   auto temp_path = sstable_path_;
   temp_path.replace_extension(".tmp");
 
+  // Atomic finalization boundary: only the completed file receives .sst.
   // Rename from the temporary path (.tmp) to the final .sst path
   if (std::rename(temp_path.c_str(), sstable_path_.c_str()) != 0) {
     // Handle rename error (e.g., check errno)
@@ -339,10 +392,20 @@ void kronos::SstableBuilder::finish() {
   }
 }
 
-//
-// Reader class functions from here
-//
+/*
+ * SSTABLE READER
+ *
+ * Opening a table:
+ * header -> footer -> sparse index
+ *
+ * Looking up a key:
+ * sparse index in RAM
+ * -> candidate data block on disk
+ * -> block in RAM
+ * -> exact record
+ */
 
+// Reader-side mirror of write_all(): keep reading until the buffer is full.
 void read_exact(int fd, void *data, size_t size) {
   uint8_t *bytes = static_cast<uint8_t *>(data);
 
@@ -359,6 +422,7 @@ void read_exact(int fd, void *data, size_t size) {
   }
 }
 
+// Reconstruct an unsigned integer from its little-endian disk representation.
 template <typename T> T decode_from_le(const uint8_t arr[]) {
   static_assert(std::is_unsigned_v<T>);
 
@@ -388,7 +452,10 @@ void kronos::SstableReader::readHeader() {
   }
 }
 
+// The fixed-size footer lives at the end of the file and tells us
+// where the variable-size sparse index begins.
 kronos::SstableReader::FooterInfo kronos::SstableReader::readFooter() {
+  // Footer is always 8 + 8 + 4 = 20 bytes
   off_t new_offset = ::lseek(fd_, -20, SEEK_END);
 
   if (new_offset == -1) {
@@ -407,10 +474,6 @@ kronos::SstableReader::FooterInfo kronos::SstableReader::readFooter() {
   // Read next 4 bytes from the file descriptor
   read_exact(fd_, footer_crc_buffer, sizeof(footer_crc_buffer));
 
-  //   uint64_t decoded_index_offset_buffer =
-  //   decode_from_le(index_offset_buffer); uint64_t decoded_index_size_buffer =
-  //   decode_from_le(index_size_buffer);
-
   uLong crc = crc32(0L, Z_NULL, 0);
 
   crc = crc32(crc, reinterpret_cast<const Bytef *>(index_offset_buffer),
@@ -421,6 +484,7 @@ kronos::SstableReader::FooterInfo kronos::SstableReader::readFooter() {
 
   uint32_t calculated_crc = static_cast<uint32_t>(crc);
 
+  // CRC passed; index location metadata can now be trusted.
   uint32_t stored_crc = decode_from_le<uint32_t>(footer_crc_buffer);
 
   if (calculated_crc != stored_crc) {
@@ -433,29 +497,70 @@ kronos::SstableReader::FooterInfo kronos::SstableReader::readFooter() {
   return {index_offset, index_size};
 }
 
+// loadSparseIndex(offset, size)
+//           ↓
+// 1. Is the size even plausible?
+//           ↓
+// 2. Seek to index location.
+//           ↓
+// 3. Read the whole serialized index into RAM.
+//           ↓
+// 4. Separate:
+//    [payload][CRC]
+//           ↓
+// 5. Recalculate CRC.
+//    If mismatch → corruption.
+//           ↓
+// 6. cursor = 0
+//           ↓
+// 7. Read entry_count.
+//           ↓
+// 8. Repeat entry_count times:
+//    read key length
+//    read key
+//    read block offset
+//    read block size
+//
+//           ↓
+// 9. Turn each disk representation into
+//    SparseIndexEntry C++ objects.
+//           ↓
+// 10. Ensure no unexplained bytes remain.
+//           ↓
+// sparse_index_ ready
+
 void kronos::SstableReader::loadSparseIndex(uint64_t index_offset,
                                             uint64_t index_size) {
+  // EVen an empty sparse index has 8 bytes
   if (index_size < 8) {
     throw std::runtime_error("Invalid SSTable sparse index size");
   }
 
+  // Moves cursor to beginnning of sparse index
   if (::lseek(fd_, static_cast<off_t>(index_offset), SEEK_SET) == -1) {
     throw std::runtime_error("Failed to seek to SSTable sparse index");
   }
 
+  // It's just a RAM buffer large enough to hold the serialized sparse index
+  // exactly as it exists on disk.
   std::vector<uint8_t> index_bytes(static_cast<size_t>(index_size));
 
+  // Now we copy the sparse index from disk into that vector.
   read_exact(fd_, index_bytes.data(), index_bytes.size());
 
+  // This is the index (entry) without the CRC checksum value
   size_t payload_size = index_bytes.size() - sizeof(uint32_t);
 
   uLong crc = crc32(0L, Z_NULL, 0);
 
+  // Calculate the checksum of the first payload_size bytes in index_bytes
   crc = crc32(crc, reinterpret_cast<const Bytef *>(index_bytes.data()),
               static_cast<uInt>(payload_size));
 
+  // our sstable stores crc32 as 32 bit
   uint32_t calculated_crc = static_cast<uint32_t>(crc);
 
+  // since we're on the RAM now, we cannot use ::lseek() to move the cursor
   const uint8_t *stored_crc_ptr = index_bytes.data() + payload_size;
 
   uint32_t stored_crc = decode_from_le<uint32_t>(stored_crc_ptr);
@@ -464,6 +569,9 @@ void kronos::SstableReader::loadSparseIndex(uint64_t index_offset,
     throw std::runtime_error("Invalid SSTable sparse index CRC");
   }
 
+  // CRC passed. It is now safe to interpret lengths and offsets.
+
+  // cursor tracks our current byte while deserializing the payload.
   size_t cursor = 0;
 
   // Helper: make sure we never read past the CRC-protected payload.
@@ -477,32 +585,39 @@ void kronos::SstableReader::loadSparseIndex(uint64_t index_offset,
   // 1. Read entry_count
   // --------------------------------------------------
 
+  // our format starts with [entry_count] and is uint32_t type
   require_bytes(sizeof(uint32_t));
 
+  // Index begins with the number of block descriptors that follow.
   uint32_t entry_count = decode_from_le<uint32_t>(index_bytes.data() + cursor);
 
   cursor += sizeof(uint32_t);
 
-  // Basic sanity check.
-  // Smallest possible index entry:
-  // 4 bytes key length
-  // 0 bytes key
-  // 8 bytes block offset
-  // 4 bytes block size
-  // = 16 bytes
+  // Minimum entry = key_len(4) + empty key(0) + offset(8) + size(4) = 16 bytes.
+  // Reject an entry_count that physically cannot fit in this payload.
   size_t remaining_bytes = payload_size - cursor;
-
+  // The smallest mininum smallest entry will be 16 bytes
+  //
+  //
+  //  first_key_length     4
+  //  first_key            0   ← technically empty
+  //  block_offset         8
+  //  block_size           4
+  //  ----------------------
+  //  minimum             16 bytes
+  //
+  //  remaining_bytes / 16 -> is the max number of entries possible
   if (entry_count > remaining_bytes / 16) {
     throw std::runtime_error("Invalid SSTable sparse index entry count");
   }
 
   sparse_index_.clear();
-  sparse_index_.reserve(entry_count);
+  sparse_index_.reserve(entry_count); // To optimize performance
 
   // --------------------------------------------------
   // 2. Parse every SparseIndexEntry
   // --------------------------------------------------
-
+  // Deserialize each disk entry into a usable RAM object.
   for (uint32_t i = 0; i < entry_count; i++) {
 
     // ---- firstKey length ----
@@ -558,6 +673,200 @@ void kronos::SstableReader::loadSparseIndex(uint64_t index_offset,
     throw std::runtime_error(
         "Unexpected trailing bytes in SSTable sparse index");
   }
+}
+
+/*
+ * Point lookup:
+ *
+ * 1. Search the RAM sparse index for the candidate block.
+ * 2. Jump directly to that block on disk.
+ * 3. Read the block into RAM and verify its CRC.
+ * 4. Sequentially scan its sorted records for the exact key.
+ */
+kronos::SstableReader::GetResult
+kronos::SstableReader::get(const std::string &key) const {
+
+  GetResult g = {.value = "", .status = GetStatus::NOT_FOUND};
+  if (sparse_index_.empty()) {
+    return g;
+  }
+
+  if (key < sparse_index_[0].firstKey) {
+    return g;
+  }
+
+  size_t target_id = 0;
+
+  for (size_t i = 1; i < sparse_index_.size(); i++) {
+    if (sparse_index_[i].firstKey <= key) {
+      target_id = i;
+
+    } else {
+      break;
+    }
+  }
+
+  // Sparse index gives us the exact disk region containing the candidate block.
+  uint64_t target_block_offset = sparse_index_[target_id].block_offset;
+  uint32_t target_block_size = sparse_index_[target_id].block_size;
+
+  // Now we have our block.
+  // Address:Block starts "block_offset" bytes from the beginning of the file
+
+  if (::lseek(fd_, static_cast<off_t>(target_block_offset), SEEK_SET) == -1) {
+    throw std::runtime_error("Failed to seek to SSTable data block");
+  }
+
+  std::vector<uint8_t> block_bytes(target_block_size);
+
+  read_exact(fd_, block_bytes.data(), block_bytes.size());
+
+  // This is the index (entry) without the CRC checksum value
+  size_t payload_size = block_bytes.size() - sizeof(uint32_t);
+
+  uLong crc = crc32(0L, Z_NULL, 0);
+
+  crc = crc32(crc, reinterpret_cast<const Bytef *>(block_bytes.data()),
+              static_cast<uInt>(payload_size));
+
+  // Converting checksum to uint32_t as zlib returns the checksum as uLong.
+  uint32_t checksum_value = static_cast<uint32_t>(crc);
+  const uint8_t *stored_crc_ptr = block_bytes.data() + payload_size;
+
+  uint32_t stored_crc = decode_from_le<uint32_t>(stored_crc_ptr);
+
+  if (checksum_value != stored_crc) {
+    throw std::runtime_error("Invalid SSTable block CRC");
+  }
+
+  // --------------------------------------------------
+  // 4. Parse block
+  // --------------------------------------------------
+
+  size_t cursor = 0;
+
+  auto require_bytes = [&](size_t count) {
+    if (cursor > payload_size || count > payload_size - cursor) {
+      throw std::runtime_error("Corrupted SSTable data block");
+    }
+  };
+
+  // First 4 bytes = record_count.
+  require_bytes(sizeof(uint32_t));
+
+  uint32_t record_count = decode_from_le<uint32_t>(block_bytes.data() + cursor);
+
+  cursor += sizeof(uint32_t);
+
+  // Every record requires at least:
+  // sequence      = 8
+  // operation     = 1
+  // key_length    = 4
+  // value_length  = 4
+  // -----------------
+  // minimum       = 17 bytes
+
+  size_t remaining_bytes = payload_size - cursor;
+
+  if (record_count > remaining_bytes / 17) {
+    throw std::runtime_error("Invalid SSTable record count");
+  }
+
+  // --------------------------------------------------
+  // 5. Scan records inside candidate block
+  // --------------------------------------------------
+
+  for (uint32_t i = 0; i < record_count; i++) {
+
+    // ---- sequence ----
+
+    require_bytes(sizeof(uint64_t));
+
+    uint64_t sequence = decode_from_le<uint64_t>(block_bytes.data() + cursor);
+
+    cursor += sizeof(uint64_t);
+
+    // Sequence is stored/read correctly,
+    // but single-SSTable get() does not need it yet.
+    (void)sequence;
+
+    // ---- operation ----
+
+    require_bytes(sizeof(uint8_t));
+
+    uint8_t operation_byte = block_bytes[cursor];
+
+    cursor += sizeof(uint8_t);
+
+    // ---- key length ----
+
+    require_bytes(sizeof(uint32_t));
+
+    uint32_t key_length = decode_from_le<uint32_t>(block_bytes.data() + cursor);
+
+    cursor += sizeof(uint32_t);
+
+    // ---- value length ----
+
+    require_bytes(sizeof(uint32_t));
+
+    uint32_t value_length =
+        decode_from_le<uint32_t>(block_bytes.data() + cursor);
+
+    cursor += sizeof(uint32_t);
+
+    // ---- key ----
+
+    require_bytes(key_length);
+
+    std::string record_key(
+        reinterpret_cast<const char *>(block_bytes.data() + cursor),
+        key_length);
+
+    cursor += key_length;
+
+    // ---- value ----
+
+    require_bytes(value_length);
+
+    std::string record_value(
+        reinterpret_cast<const char *>(block_bytes.data() + cursor),
+        value_length);
+
+    cursor += value_length;
+
+    // --------------------------------------------------
+    // 6. Compare this record with requested key
+    // --------------------------------------------------
+
+    if (record_key == key) {
+
+      if (operation_byte == static_cast<uint8_t>(OperationType::DELETE)) {
+
+        return {.value = "", .status = GetStatus::DELETED};
+      }
+
+      if (operation_byte == static_cast<uint8_t>(OperationType::PUT)) {
+
+        return {.value = std::move(record_value), .status = GetStatus::FOUND};
+      }
+
+      throw std::runtime_error("Invalid operation type in SSTable record");
+    }
+
+    // Records are sorted.
+    // If we've already passed our target,
+    // it cannot appear later in this block.
+    if (record_key > key) {
+      return g;
+    }
+  }
+  if (cursor != payload_size) {
+    throw std::runtime_error("Unexpected trailing bytes in SSTable data block");
+  }
+
+  // We scanned the candidate block and didn't find it.
+  return g;
 }
 
 kronos::SstableReader::SstableReader(const std::filesystem::path &path) {

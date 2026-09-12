@@ -5,8 +5,19 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+/* SSTable format will be:
+[ HEADER ]
+[ DATA BLOCK ]
+[ DATA BLOCK ]
+ ...
+ ...
+[ DATA BLOCK ]
+[ SPARSE INDEX ]
+[ FOOTER ]
+ */
 namespace kronos {
 class SstableBuilder {
+
 public:
   explicit SstableBuilder(const std::filesystem::path &path, size_t blockSize);
   ~SstableBuilder();
@@ -31,8 +42,9 @@ private:
   int fd_ = -1;
   void writeHeader(); //  → writes magic + format version
   void flushCurrentBlock();
-  void writeSparseIndex(); // serializes sparse_index_ and writes (entry_count +
+  // serializes sparse_index_ and writes (entry_count +
   // entries + CRC)
+  void writeSparseIndex();
   void writeFooter(
       uint64_t index_offset,
       uint64_t index_size); // writes where the sparse index lives + footer CRC

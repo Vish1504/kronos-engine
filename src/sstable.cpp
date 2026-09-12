@@ -2,6 +2,7 @@
 #include <kronos/sstable.hpp>
 
 #include <iostream>
+#include <stdexcept>
 #include <type_traits>
 
 template <typename T> void encode_to_le(uint8_t arr[], T value) {
@@ -23,6 +24,17 @@ void write_all(int fd, const uint8_t *data, size_t size) {
     written += static_cast<size_t>(result);
   }
 }
+
+/* SSTable format will be:
+[ HEADER ]
+[ DATA BLOCK ]
+[ DATA BLOCK ]
+ ...
+ ...
+[ DATA BLOCK ]
+[ SPARSE INDEX ]
+[ FOOTER ]
+ */
 
 kronos::SstableBuilder::SstableBuilder(const std::filesystem::path &path,
                                        size_t blockSize) {
@@ -176,4 +188,140 @@ void kronos::SstableBuilder::flushCurrentBlock() {
   current_block_.clear();
   currentBlock_recordCount_ = 0;
   currentBlock_firstKey_.clear();
+}
+
+void kronos::SstableBuilder::writeSparseIndex() {
+
+  uint32_t entry_count = static_cast<uint32_t>(sparse_index_.size());
+  uint8_t entry_count_bytes[4];
+  encode_to_le(entry_count_bytes, entry_count);
+  std::vector<uint8_t> index_bytes;
+  index_bytes.insert(index_bytes.end(), entry_count_bytes,
+                     entry_count_bytes + sizeof(entry_count_bytes));
+  //   serialize
+  for (size_t i = 0; i < sparse_index_.size(); i++) {
+    // first key length
+    uint32_t firstKey_length =
+        static_cast<uint32_t>(sparse_index_[i].firstKey.size());
+    uint8_t firstKey_length_bytes[4];
+    encode_to_le(firstKey_length_bytes, firstKey_length);
+    index_bytes.insert(index_bytes.end(), firstKey_length_bytes,
+                       firstKey_length_bytes + sizeof(firstKey_length_bytes));
+
+    // first key
+    for (char c : sparse_index_[i].firstKey) {
+      index_bytes.push_back(static_cast<uint8_t>(c));
+    }
+
+    // block_offset
+    uint64_t block_offset = sparse_index_[i].block_offset;
+    uint8_t block_offset_bytes[8];
+    encode_to_le(block_offset_bytes, block_offset);
+    index_bytes.insert(index_bytes.end(), block_offset_bytes,
+                       block_offset_bytes + sizeof(block_offset_bytes));
+
+    // block_size
+    uint32_t block_size = sparse_index_[i].block_size;
+    uint8_t block_size_bytes[4];
+    encode_to_le(block_size_bytes, block_size);
+    index_bytes.insert(index_bytes.end(), block_size_bytes,
+                       block_size_bytes + sizeof(block_size_bytes));
+  }
+
+  // Now we calculate CRC32 over [entry_count][all index entries]
+  // Initialize the CRC register
+  uLong crc = crc32(0L, Z_NULL, 0);
+
+  // Update CRC with the all index_bytes.
+  crc = crc32(crc, reinterpret_cast<const Bytef *>(index_bytes.data()),
+              static_cast<uInt>(index_bytes.size()));
+
+  // Converting checksum to uint32_t as zlib returns the checksum as uLong.
+  uint32_t index_checksum_value = static_cast<uint32_t>(crc);
+  uint8_t index_checksum_bytes[4];
+  encode_to_le(index_checksum_bytes, index_checksum_value);
+
+  /* Final sparse index layout:
+     [entry_count][all index entries][CRC32]
+  */
+  index_bytes.insert(index_bytes.end(), index_checksum_bytes,
+                     index_checksum_bytes + sizeof(index_checksum_bytes));
+
+  // write to .tmp file
+  write_all(fd_, index_bytes.data(), index_bytes.size());
+}
+
+void kronos::SstableBuilder::writeFooter(uint64_t index_offset,
+                                         uint64_t index_size) {
+  uint8_t index_offset_bytes[8];
+  encode_to_le(index_offset_bytes, index_offset);
+
+  uint8_t index_size_bytes[8];
+  encode_to_le(index_size_bytes, index_size);
+
+  // Now we calculate CRC32 over [index_offset][index_size]
+  // Initialize the CRC register
+  uLong crc = crc32(0L, Z_NULL, 0);
+
+  // Update CRC with the all index_offset_bytes.
+  crc = crc32(crc, reinterpret_cast<const Bytef *>(index_offset_bytes),
+              sizeof(index_offset_bytes));
+
+  // Update CRC with the all index_size_bytes.
+  crc = crc32(crc, reinterpret_cast<const Bytef *>(index_size_bytes),
+              sizeof(index_size_bytes));
+
+  // Converting checksum to uint32_t as zlib returns the checksum as uLong.
+  uint32_t footer_checksum = static_cast<uint32_t>(crc);
+  uint8_t footer_checksum_bytes[4];
+  encode_to_le(footer_checksum_bytes, footer_checksum);
+
+  write_all(fd_, index_offset_bytes, sizeof(index_offset_bytes));
+  write_all(fd_, index_size_bytes, sizeof(index_size_bytes));
+  write_all(fd_, footer_checksum_bytes, sizeof(footer_checksum_bytes));
+}
+
+void kronos::SstableBuilder::finish() {
+  flushCurrentBlock();
+
+  off_t index_offset_pos = ::lseek(fd_, 0, SEEK_CUR);
+
+  if (index_offset_pos == -1) {
+    throw std::runtime_error("Unable to get index offset position");
+  }
+
+  // off_t will be 64 bit only on a native 64 bit system
+  uint64_t index_offset = static_cast<uint64_t>(index_offset_pos);
+
+  writeSparseIndex();
+
+  off_t index_end_pos = ::lseek(fd_, 0, SEEK_CUR);
+
+  if (index_end_pos == -1) {
+    throw std::runtime_error("Unable to get index end position");
+  }
+
+  // off_t will be 64 bit only on a native 64 bit system
+  uint64_t index_end = static_cast<uint64_t>(index_end_pos);
+
+  uint64_t index_size = index_end - index_offset;
+
+  writeFooter(index_offset, index_size);
+
+  if (::fsync(fd_) == -1) {
+    throw std::runtime_error("Failed to fsync SSTable");
+  }
+
+  ::close(fd_);
+  fd_ = -1;
+
+  auto temp_path = sstable_path_;
+  temp_path.replace_extension(".tmp");
+
+  // Rename from the temporary path (.tmp) to the final .sst path
+  if (std::rename(temp_path.c_str(), sstable_path_.c_str()) != 0) {
+    // Handle rename error (e.g., check errno)
+    throw std::runtime_error(
+        "Unable to rename file extennsion from .tmp to .sst");
+  }
 }

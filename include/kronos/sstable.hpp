@@ -55,8 +55,31 @@ private:
 
 class SstableReader {
 public:
+  class Iterator {
+  public:
+    bool valid() const;
+    using Entry = InternalEntry;
+    void next(); // to move to the next record
+    const Entry &getEntry() const;
+    const std::string &getKey() const;
+    explicit Iterator(const SstableReader *reader);
+
+  private:
+    const SstableReader *reader_;      // which SSTable?
+    size_t current_block_index_;       // which block?
+    std::vector<uint8_t> block_bytes_; // current block loaded into RAM
+    size_t cursor_;                    // where inside those bytes?
+    std::string current_key_; // what record am I currently exposing? (key)
+    Entry current_entry_;     // what record am I currently exposing?
+    uint32_t record_count_;   // have I exhausted this block?
+    uint32_t current_record_index_;
+    bool valid_; // have I exhausted the entire SSTable?
+    void loadBlock(size_t block_index);
+    void parseCurrentRecord();
+  };
   explicit SstableReader(const std::filesystem::path &path);
   ~SstableReader();
+  Iterator getIterator() const;
 
   using GetResult = kronos::GetResult; // from types.hpp
   GetResult get(const std::string &key) const;

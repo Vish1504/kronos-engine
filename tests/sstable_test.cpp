@@ -186,6 +186,79 @@ int main() {
     std::cout << "PASS: SSTable Writer -> Reader round-trip" << std::endl;
 
     // ============================================================
+    // ITERATOR TEST
+    // ============================================================
+
+    {
+      SstableReader reader(path);
+
+      auto it = reader.getIterator();
+
+      std::vector<std::string> expected_keys = {"apple", "banana", "cat", "dog",
+                                                "mango"};
+
+      std::vector<std::string> actual_keys;
+
+      while (it.valid()) {
+        actual_keys.push_back(it.getKey());
+
+        const auto &entry = it.getEntry();
+
+        // Verify one normal PUT.
+        if (it.getKey() == "apple") {
+          require(entry.value == "red",
+                  "Iterator returned wrong value for apple");
+
+          require(entry.sequence == 1,
+                  "Iterator returned wrong sequence for apple");
+
+          require(entry.operation == OperationType::PUT,
+                  "Iterator returned wrong operation for apple");
+        }
+
+        // Verify tombstones survive sequential reads too.
+        if (it.getKey() == "cat") {
+          require(entry.sequence == 3,
+                  "Iterator returned wrong sequence for cat");
+
+          require(entry.operation == OperationType::DELETE,
+                  "Iterator should expose cat as DELETE");
+        }
+
+        it.next();
+      }
+
+      require(actual_keys == expected_keys,
+              "SSTable Iterator did not return records in sorted order");
+
+      std::cout << "PASS: SSTable Iterator walked all records in sorted order"
+                << std::endl;
+    }
+
+    {
+      const std::filesystem::path empty_path = "empty_sstable_test.sst";
+
+      std::filesystem::remove(empty_path);
+
+      {
+        SstableBuilder builder(empty_path, 64);
+        builder.finish();
+      }
+
+      {
+        SstableReader reader(empty_path);
+
+        auto it = reader.getIterator();
+
+        require(!it.valid(), "Iterator over empty SSTable should be invalid");
+      }
+
+      std::filesystem::remove(empty_path);
+
+      std::cout << "PASS: Empty SSTable Iterator is invalid" << std::endl;
+    }
+
+    // ============================================================
     // 3. CORRUPTION TEST
     // ============================================================
     //

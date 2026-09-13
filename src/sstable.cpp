@@ -895,3 +895,208 @@ kronos::SstableReader::~SstableReader() {
     ::close(fd_);
   }
 }
+
+kronos::SstableReader::Iterator kronos::SstableReader::getIterator() const {
+  return Iterator(this);
+}
+
+kronos::SstableReader::Iterator::Iterator(const SstableReader *reader)
+    : reader_(reader), current_block_index_(0), cursor_(0), record_count_(0),
+      current_record_index_(0), valid_(false) {
+
+  if (reader_ == nullptr) {
+    throw std::runtime_error("Iterator has no SSTable reader");
+  }
+
+  // Empty SSTable -> iterator immediately points to END.
+  if (reader_->sparse_index_.empty()) {
+    return;
+  }
+
+  // Start from the first physical data block.
+  loadBlock(0);
+
+  // Next step:
+  parseCurrentRecord();
+}
+
+void kronos::SstableReader::Iterator::loadBlock(size_t block_index) {
+
+  if (block_index >= reader_->sparse_index_.size()) {
+    throw std::runtime_error("SSTable iterator block index out of range");
+  }
+
+  current_block_index_ = block_index;
+
+  const SparseIndexEntry &block = reader_->sparse_index_[block_index];
+
+  if (block.block_size < 8) {
+    throw std::runtime_error("Invalid SSTable block size");
+  }
+
+  // Jump to this block on disk.
+  if (::lseek(reader_->fd_, static_cast<off_t>(block.block_offset), SEEK_SET) ==
+      -1) {
+    throw std::runtime_error("Failed to seek to SSTable iterator block");
+  }
+
+  // Bring the entire block into RAM.
+  block_bytes_.resize(block.block_size);
+
+  read_exact(reader_->fd_, block_bytes_.data(), block_bytes_.size());
+
+  // --------------------------------------------------
+  // Verify block CRC before parsing anything inside it.
+  // --------------------------------------------------
+
+  size_t payload_size = block_bytes_.size() - sizeof(uint32_t);
+
+  uLong crc = crc32(0L, Z_NULL, 0);
+
+  crc = crc32(crc, reinterpret_cast<const Bytef *>(block_bytes_.data()),
+              static_cast<uInt>(payload_size));
+
+  uint32_t calculated_crc = static_cast<uint32_t>(crc);
+
+  const uint8_t *stored_crc_ptr = block_bytes_.data() + payload_size;
+
+  uint32_t stored_crc = decode_from_le<uint32_t>(stored_crc_ptr);
+
+  if (calculated_crc != stored_crc) {
+    throw std::runtime_error("Invalid SSTable block CRC");
+  }
+
+  // --------------------------------------------------
+  // Prepare to walk this block.
+  // --------------------------------------------------
+
+  cursor_ = 0;
+
+  if (payload_size < sizeof(uint32_t)) {
+    throw std::runtime_error("Corrupted SSTable data block");
+  }
+
+  // Every block begins with record_count.
+  record_count_ = decode_from_le<uint32_t>(block_bytes_.data());
+
+  cursor_ += sizeof(uint32_t);
+
+  current_record_index_ = 0;
+
+  if (record_count_ == 0) {
+    throw std::runtime_error("Indexed SSTable block contains no records");
+  }
+}
+
+void kronos::SstableReader::Iterator::parseCurrentRecord() {
+
+  size_t payload_size = block_bytes_.size() - sizeof(uint32_t);
+
+  auto require_bytes = [&](size_t count) {
+    if (cursor_ > payload_size || count > payload_size - cursor_) {
+      throw std::runtime_error("Corrupted SSTable data block");
+    }
+  };
+
+  // sequence
+  require_bytes(sizeof(uint64_t));
+
+  uint64_t sequence = decode_from_le<uint64_t>(block_bytes_.data() + cursor_);
+
+  cursor_ += sizeof(uint64_t);
+
+  // operation
+  require_bytes(sizeof(uint8_t));
+
+  uint8_t operation_byte = block_bytes_[cursor_];
+
+  cursor_ += sizeof(uint8_t);
+
+  // key length
+  require_bytes(sizeof(uint32_t));
+
+  uint32_t key_length = decode_from_le<uint32_t>(block_bytes_.data() + cursor_);
+
+  cursor_ += sizeof(uint32_t);
+
+  // value length
+  require_bytes(sizeof(uint32_t));
+
+  uint32_t value_length =
+      decode_from_le<uint32_t>(block_bytes_.data() + cursor_);
+
+  cursor_ += sizeof(uint32_t);
+
+  // key
+  require_bytes(key_length);
+
+  current_key_ =
+      std::string(reinterpret_cast<const char *>(block_bytes_.data() + cursor_),
+                  key_length);
+
+  cursor_ += key_length;
+
+  // value
+  require_bytes(value_length);
+
+  std::string value(
+      reinterpret_cast<const char *>(block_bytes_.data() + cursor_),
+      value_length);
+
+  cursor_ += value_length;
+
+  current_entry_ = {.value = std::move(value),
+                    .sequence = sequence,
+                    .operation = static_cast<OperationType>(operation_byte)};
+
+  valid_ = true;
+}
+
+bool kronos::SstableReader::Iterator::valid() const { return valid_; }
+
+const std::string &kronos::SstableReader::Iterator::getKey() const {
+
+  if (!valid_) {
+    throw std::runtime_error("SSTable iterator is not valid");
+  }
+
+  return current_key_;
+}
+
+const kronos::SstableReader::Iterator::Entry &
+kronos::SstableReader::Iterator::getEntry() const {
+
+  if (!valid_) {
+    throw std::runtime_error("SSTable iterator is not valid");
+  }
+
+  return current_entry_;
+}
+
+void kronos::SstableReader::Iterator::next() {
+
+  // Already at the end of the SSTable.
+  if (!valid_) {
+    return;
+  }
+
+  // More records remain inside the current block.
+  if (current_record_index_ + 1 < record_count_) {
+    current_record_index_++;
+    parseCurrentRecord();
+    return;
+  }
+
+  // Current block is exhausted.
+  size_t next_block_index = current_block_index_ + 1;
+
+  // No more blocks -> end of SSTable.
+  if (next_block_index >= reader_->sparse_index_.size()) {
+    valid_ = false;
+    return;
+  }
+
+  // Move to the next block and expose its first record.
+  loadBlock(next_block_index);
+  parseCurrentRecord();
+}

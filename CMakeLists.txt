@@ -39,13 +39,14 @@ find_package(ZLIB REQUIRED)
 # the storage engine.
 add_executable(
     kronos
-
     src/main.cpp
     src/logger.cpp
     src/config.cpp
     src/wal.cpp
     src/memtable.cpp
     src/sstable.cpp
+    src/bloom_filter.cpp
+    src/third_party/murmurhash3/MurmurHash3.cpp
 )
 
 
@@ -62,6 +63,7 @@ target_include_directories(
 
     PRIVATE
     include
+    src
 )
 
 

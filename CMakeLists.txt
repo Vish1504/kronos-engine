@@ -179,3 +179,21 @@ target_link_libraries(
     PRIVATE
     ZLIB::ZLIB
 )
+
+# =========================================================
+# BLOOM FILTER UNIT TEST
+# =========================================================
+
+add_executable(
+    bloom_filter_test
+    tests/bloom_filter_test.cpp
+    src/bloom_filter.cpp
+    src/third_party/murmurhash3/MurmurHash3.cpp
+)
+
+target_include_directories(
+    bloom_filter_test
+    PRIVATE
+    include
+    src
+)

@@ -94,7 +94,7 @@ int main() {
 
     {
       // Small target deliberately forces multiple data blocks.
-      SstableBuilder builder(path, 64);
+      SstableBuilder builder(path, 64, 10, 5);
 
       builder.add("apple", InternalEntry{.value = "red",
                                          .sequence = 1,
@@ -241,7 +241,7 @@ int main() {
       std::filesystem::remove(empty_path);
 
       {
-        SstableBuilder builder(empty_path, 64);
+        SstableBuilder builder(empty_path, 64, 10, 1);
         builder.finish();
       }
 

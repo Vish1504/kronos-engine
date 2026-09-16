@@ -2,6 +2,7 @@
 #include <cmath>
 #include <kronos/bloom_filter.hpp>
 #include <stdexcept>
+#include <utility>
 namespace {
 
 constexpr uint32_t bloom_filter_seed = 0xbc9f1d34;
@@ -29,6 +30,15 @@ kronos::bloom_filter::bloom_filter(const size_t &bits_per_key,
 
   if (probe_count_ == 0) {
     probe_count_ = 1;
+  }
+}
+
+kronos::bloom_filter::bloom_filter(size_t bit_count, size_t probe_count,
+                                   std::vector<uint8_t> bits)
+    : bit_count_(bit_count), bits_(std::move(bits)), probe_count_(probe_count) {
+
+  if (bit_count_ == 0 || probe_count_ == 0 || bits_.empty()) {
+    throw std::invalid_argument("Invalid persisted Bloom filter state");
   }
 }
 
@@ -68,3 +78,9 @@ bool kronos::bloom_filter::mayContain(const std::string &key) const {
 
   return true;
 }
+
+size_t kronos::bloom_filter::bitCount() const { return bit_count_; }
+
+size_t kronos::bloom_filter::probeCount() const { return probe_count_; }
+
+const std::vector<uint8_t> &kronos::bloom_filter::bits() const { return bits_; }

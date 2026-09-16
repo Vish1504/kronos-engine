@@ -1,99 +1,187 @@
 #pragma once
+
+#include "kronos/bloom_filter.hpp"
 #include "kronos/types.hpp"
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
-/* SSTable format will be:
+
+/*
+SSTable format:
+
 [ HEADER ]
+
 [ DATA BLOCK ]
 [ DATA BLOCK ]
- ...
- ...
+...
 [ DATA BLOCK ]
+
+[ BLOOM FILTER ]
+
 [ SPARSE INDEX ]
+
 [ FOOTER ]
- */
+*/
+
 namespace kronos {
 
-// SparseIndexEntry will be shared by both SstableBuilder & SstableReader
+// SparseIndexEntry is shared by both SstableBuilder and SstableReader.
 struct SparseIndexEntry {
   std::string firstKey;
+
   uint64_t block_offset;
   uint32_t block_size;
 };
+
 class SstableBuilder {
 
 public:
-  explicit SstableBuilder(const std::filesystem::path &path, size_t blockSize);
+  explicit SstableBuilder(const std::filesystem::path &path, size_t blockSize,
+                          size_t bitsPerKey, size_t keyCount);
+
   ~SstableBuilder();
 
   using Entry = InternalEntry;
+
   void add(std::string key, InternalEntry e);
+
   void finish();
 
 private:
-  //   const char sstable_magic_[4] = {'K', 'S', 'S', 'T'};
   std::filesystem::path sstable_path_;
+
   size_t target_blockSize_;
+
   size_t currentBlock_recordCount_ = 0;
+
   std::string currentBlock_firstKey_;
+
   std::vector<uint8_t> current_block_;
 
   std::vector<SparseIndexEntry> sparse_index_;
+
   int fd_ = -1;
-  void writeHeader(); //  → writes magic + format version
+
+  // Writes magic + format version.
+  void writeHeader();
+
   void flushCurrentBlock();
-  // serializes sparse_index_ and writes (entry_count +
-  // entries + CRC)
+
+  // Serializes the Bloom filter and writes:
+  //
+  // [bit_count]
+  // [probe_count]
+  // [packed bits]
+  // [CRC32]
+  void writeBloomFilter();
+
+  // Serializes sparse_index_ and writes:
+  //
+  // [entry_count]
+  // [index entries]
+  // [CRC32]
   void writeSparseIndex();
-  void writeFooter(
-      uint64_t index_offset,
-      uint64_t index_size); // writes where the sparse index lives + footer CRC
+
+  // Writes:
+  //
+  // [bloom_offset]
+  // [bloom_size]
+  // [index_offset]
+  // [index_size]
+  // [CRC32]
+  void writeFooter(uint64_t bloom_offset, uint64_t bloom_size,
+                   uint64_t index_offset, uint64_t index_size);
+
+  // Bloom filter belonging to this SSTable.
+  bloom_filter bloom_filter_;
 };
 
 class SstableReader {
+
 public:
   class Iterator {
+
   public:
     bool valid() const;
+
     using Entry = InternalEntry;
-    void next(); // to move to the next record
+
+    void next();
+
     const Entry &getEntry() const;
+
     const std::string &getKey() const;
+
     explicit Iterator(const SstableReader *reader);
 
   private:
-    const SstableReader *reader_;      // which SSTable?
-    size_t current_block_index_;       // which block?
-    std::vector<uint8_t> block_bytes_; // current block loaded into RAM
-    size_t cursor_;                    // where inside those bytes?
-    std::string current_key_; // what record am I currently exposing? (key)
-    Entry current_entry_;     // what record am I currently exposing?
-    uint32_t record_count_;   // have I exhausted this block?
+    const SstableReader *reader_; // Which SSTable?
+
+    size_t current_block_index_; // Which block?
+
+    std::vector<uint8_t> block_bytes_; // Current block loaded into RAM.
+
+    size_t cursor_; // Current position inside block.
+
+    std::string current_key_;
+
+    Entry current_entry_;
+
+    uint32_t record_count_;
+
     uint32_t current_record_index_;
-    bool valid_; // have I exhausted the entire SSTable?
+
+    bool valid_;
+
     void loadBlock(size_t block_index);
+
     void parseCurrentRecord();
   };
+
   explicit SstableReader(const std::filesystem::path &path);
+
   ~SstableReader();
+
   Iterator getIterator() const;
 
-  using GetResult = kronos::GetResult; // from types.hpp
+  using GetResult = kronos::GetResult;
+
   GetResult get(const std::string &key) const;
 
 private:
   int fd_ = -1;
+
   std::vector<SparseIndexEntry> sparse_index_;
+
+  // Empty until the Bloom block has been loaded from disk.
+  std::optional<bloom_filter> bloom_filter_;
+
   void readHeader();
+
   struct FooterInfo {
+    uint64_t bloom_offset;
+    uint64_t bloom_size;
+
     uint64_t index_offset;
     uint64_t index_size;
   };
 
   FooterInfo readFooter();
+
+  // Reads:
+  //
+  // [bit_count]
+  // [probe_count]
+  // [packed bits]
+  // [CRC32]
+  //
+  // verifies the CRC and restores bloom_filter_.
+  void loadBloomFilter(uint64_t bloom_offset, uint64_t bloom_size);
+
   void loadSparseIndex(uint64_t index_offset, uint64_t index_size);
 };
+
 } // namespace kronos

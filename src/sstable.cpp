@@ -1,16 +1,18 @@
 #include <cstddef>
 #include <kronos/sstable.hpp>
 
-#include <iostream>
-#include <stdexcept>
-#include <type_traits>
-
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <iostream>
+#include <stdexcept>
+#include <type_traits>
 #include <unistd.h>
+#include <utility>
 #include <zlib.h>
+
+#include "kronos/bloom_filter.hpp"
 
 /*
  * SSTABLE ON-DISK FORMAT
@@ -81,7 +83,10 @@ void write_all(int fd, const void *data, size_t size) {
 // Build into a .tmp file so an incomplete SSTable is never mistaken for a
 // successfully finalized table.
 kronos::SstableBuilder::SstableBuilder(const std::filesystem::path &path,
-                                       size_t blockSize) {
+                                       size_t blockSize, size_t bitsPerKey,
+                                       size_t keyCount)
+    : sstable_path_(path), target_blockSize_(blockSize),
+      bloom_filter_(bitsPerKey, keyCount) {
 
   sstable_path_ = path;
   target_blockSize_ = blockSize;
@@ -129,6 +134,7 @@ void kronos::SstableBuilder::writeHeader() {
 // Serialize one logical Memtable entry into the SSTable record format.
 // [sequence:8][operation:1][key_len:4][value_len:4][key][value]
 void kronos::SstableBuilder::add(std::string key, InternalEntry e) {
+  bloom_filter_.add(key);
   uint8_t sequence_bytes[8];
   encode_to_le(sequence_bytes, e.sequence);
 
@@ -248,6 +254,53 @@ void kronos::SstableBuilder::flushCurrentBlock() {
 //
 // Each entry:
 // [first_key_len][first_key][block_offset][block_size]
+void kronos::SstableBuilder::writeBloomFilter() {
+  std::vector<uint8_t> bloom_block;
+
+  uint32_t bit_count = static_cast<uint32_t>(bloom_filter_.bitCount());
+
+  uint8_t bit_count_bytes[4];
+  encode_to_le(bit_count_bytes, bit_count);
+  bloom_block.insert(bloom_block.end(), bit_count_bytes, bit_count_bytes + 4);
+
+  uint32_t probe_count = static_cast<uint32_t>(bloom_filter_.probeCount());
+  uint8_t probe_count_bytes[4];
+  encode_to_le(probe_count_bytes, probe_count);
+  bloom_block.insert(bloom_block.end(), probe_count_bytes,
+                     probe_count_bytes + 4);
+
+  // append the Bloom filter's packed bits
+  const auto &bits = bloom_filter_.bits();
+  bloom_block.insert(bloom_block.end(), bits.begin(), bits.end());
+
+  // Now we calculate CRC32 over [entry_count][all index entries]
+  // Initialize the CRC register
+  uLong crc = crc32(0L, Z_NULL, 0);
+
+  // Update CRC with the all index_bytes.
+  crc = crc32(crc, reinterpret_cast<const Bytef *>(bloom_block.data()),
+              static_cast<uInt>(bloom_block.size()));
+
+  // Converting checksum to uint32_t as zlib returns the checksum as uLong.
+  uint32_t bloom_block_checksum_value = static_cast<uint32_t>(crc);
+  uint8_t bloom_block_checksum_bytes[4];
+  encode_to_le(bloom_block_checksum_bytes, bloom_block_checksum_value);
+
+  /* Final sparse index layout:
+     [entry_count][all index entries][CRC32]
+  */
+  bloom_block.insert(bloom_block.end(), bloom_block_checksum_bytes,
+                     bloom_block_checksum_bytes +
+                         sizeof(bloom_block_checksum_bytes));
+
+  // write to .tmp file
+  write_all(fd_, bloom_block.data(), bloom_block.size());
+}
+
+// Serialize the in-memory sparse index after all data blocks are written.
+//
+// Each entry:
+// [first_key_len][first_key][block_offset][block_size]
 void kronos::SstableBuilder::writeSparseIndex() {
 
   uint32_t entry_count = static_cast<uint32_t>(sparse_index_.size());
@@ -312,18 +365,34 @@ void kronos::SstableBuilder::writeSparseIndex() {
   write_all(fd_, index_bytes.data(), index_bytes.size());
 }
 
-void kronos::SstableBuilder::writeFooter(uint64_t index_offset,
+void kronos::SstableBuilder::writeFooter(uint64_t bloom_offset,
+                                         uint64_t bloom_size,
+                                         uint64_t index_offset,
                                          uint64_t index_size) {
+  uint8_t bloom_offset_bytes[8];
+  encode_to_le(bloom_offset_bytes, bloom_offset);
+
+  uint8_t bloom_size_bytes[8];
+  encode_to_le(bloom_size_bytes, bloom_size);
+
   uint8_t index_offset_bytes[8];
   encode_to_le(index_offset_bytes, index_offset);
 
   uint8_t index_size_bytes[8];
   encode_to_le(index_size_bytes, index_size);
 
-  // Now we calculate CRC32 over [index_offset][index_size]
-  // Initialize the CRC register
+  // Now we calculate CRC32 over
+  // [bloom_offset][bloom_size][index_offset][index_size] Initialize the CRC
+  // register
   uLong crc = crc32(0L, Z_NULL, 0);
 
+  // Update CRC with the all bloom_offset_bytes.
+  crc = crc32(crc, reinterpret_cast<const Bytef *>(bloom_offset_bytes),
+              sizeof(bloom_offset_bytes));
+
+  // Update CRC with the all bloom_size_bytes.
+  crc = crc32(crc, reinterpret_cast<const Bytef *>(bloom_size_bytes),
+              sizeof(bloom_size_bytes));
   // Update CRC with the all index_offset_bytes.
   crc = crc32(crc, reinterpret_cast<const Bytef *>(index_offset_bytes),
               sizeof(index_offset_bytes));
@@ -337,41 +406,82 @@ void kronos::SstableBuilder::writeFooter(uint64_t index_offset,
   uint8_t footer_checksum_bytes[4];
   encode_to_le(footer_checksum_bytes, footer_checksum);
 
+  write_all(fd_, bloom_offset_bytes, sizeof(bloom_offset_bytes));
+  write_all(fd_, bloom_size_bytes, sizeof(bloom_size_bytes));
   write_all(fd_, index_offset_bytes, sizeof(index_offset_bytes));
   write_all(fd_, index_size_bytes, sizeof(index_size_bytes));
   write_all(fd_, footer_checksum_bytes, sizeof(footer_checksum_bytes));
 }
 
 // Finalize the SSTable in strict order:
-// final block -> sparse index -> footer -> fsync -> rename .tmp to .sst
+// final block -> bloom filter -> sparse index -> footer -> fsync -> rename .tmp
+// to .sst
+// Finalize the SSTable in strict order:
+// final block -> bloom filter -> sparse index -> footer -> fsync -> rename .tmp
+// to .sst
 void kronos::SstableBuilder::finish() {
 
   // add() may have left one partially filled block in RAM.
   flushCurrentBlock();
 
+  // ---------------------------------------------------------
+  // BLOOM FILTER
+  // ---------------------------------------------------------
+
+  // Current file position is where the Bloom filter will begin.
+  off_t bloom_offset_pos = ::lseek(fd_, 0, SEEK_CUR);
+
+  if (bloom_offset_pos == -1) {
+    throw std::runtime_error("Unable to get Bloom filter offset position");
+  }
+
+  uint64_t bloom_offset = static_cast<uint64_t>(bloom_offset_pos);
+
+  writeBloomFilter();
+
+  // ---------------------------------------------------------
+  // SPARSE INDEX
+  // ---------------------------------------------------------
+
+  // Bloom filter has finished.
+  // The current position is now where the sparse index begins.
   off_t index_offset_pos = ::lseek(fd_, 0, SEEK_CUR);
 
   if (index_offset_pos == -1) {
     throw std::runtime_error("Unable to get index offset position");
   }
 
-  // off_t will be 64 bit only on a native 64 bit system
   uint64_t index_offset = static_cast<uint64_t>(index_offset_pos);
+
+  // Since the index immediately follows the Bloom filter:
+  // bloom_size = index start - bloom start.
+  uint64_t bloom_size = index_offset - bloom_offset;
 
   writeSparseIndex();
 
+  // Current position is now the end of the sparse index.
   off_t index_end_pos = ::lseek(fd_, 0, SEEK_CUR);
 
   if (index_end_pos == -1) {
     throw std::runtime_error("Unable to get index end position");
   }
 
-  // off_t will be 64 bit only on a native 64 bit system
   uint64_t index_end = static_cast<uint64_t>(index_end_pos);
 
   uint64_t index_size = index_end - index_offset;
 
-  writeFooter(index_offset, index_size);
+  // ---------------------------------------------------------
+  // FOOTER
+  // ---------------------------------------------------------
+
+  // TEMPORARILY leave this as-is.
+  // We'll change writeFooter() next so it also receives
+  // bloom_offset and bloom_size.
+  writeFooter(bloom_offset, bloom_size, index_offset, index_size);
+
+  // ---------------------------------------------------------
+  // DURABILITY + ATOMIC FINALIZATION
+  // ---------------------------------------------------------
 
   if (::fsync(fd_) == -1) {
     throw std::runtime_error("Failed to fsync SSTable");
@@ -383,12 +493,11 @@ void kronos::SstableBuilder::finish() {
   auto temp_path = sstable_path_;
   temp_path.replace_extension(".tmp");
 
-  // Atomic finalization boundary: only the completed file receives .sst.
-  // Rename from the temporary path (.tmp) to the final .sst path
+  // Atomic finalization boundary:
+  // only the completed file receives the .sst extension.
   if (std::rename(temp_path.c_str(), sstable_path_.c_str()) != 0) {
-    // Handle rename error (e.g., check errno)
     throw std::runtime_error(
-        "Unable to rename file extennsion from .tmp to .sst");
+        "Unable to rename file extension from .tmp to .sst");
   }
 }
 
@@ -455,46 +564,64 @@ void kronos::SstableReader::readHeader() {
 // The fixed-size footer lives at the end of the file and tells us
 // where the variable-size sparse index begins.
 kronos::SstableReader::FooterInfo kronos::SstableReader::readFooter() {
-  // Footer is always 8 + 8 + 4 = 20 bytes
-  off_t new_offset = ::lseek(fd_, -20, SEEK_END);
 
-  if (new_offset == -1) {
-    throw std::runtime_error("Failed to seek to SSTable footer");
+  // Footer layout:
+  // [bloom_offset:u64]
+  // [bloom_size:u64]
+  // [index_offset:u64]
+  // [index_size:u64]
+  // [CRC32:u32]
+  //
+  // Total = 36 bytes
+
+  constexpr size_t footer_size = 36;
+
+  // Jump to the beginning of the footer.
+  off_t footer_position =
+      ::lseek(fd_, -static_cast<off_t>(footer_size), SEEK_END);
+
+  if (footer_position == -1) {
+    throw std::runtime_error("Unable to seek to SSTable footer");
   }
 
-  uint8_t index_offset_buffer[8] = {0};
-  // Read up to 8 bytes from the file descriptor
-  read_exact(fd_, index_offset_buffer, sizeof(index_offset_buffer));
+  uint8_t footer_bytes[footer_size];
 
-  uint8_t index_size_buffer[8] = {0};
-  // Read next  8 bytes from the file descriptor
-  read_exact(fd_, index_size_buffer, sizeof(index_size_buffer));
+  read_exact(fd_, footer_bytes, footer_size);
 
-  uint8_t footer_crc_buffer[4] = {0};
-  // Read next 4 bytes from the file descriptor
-  read_exact(fd_, footer_crc_buffer, sizeof(footer_crc_buffer));
+  // ---------------------------------------------------------
+  // Decode footer fields
+  // ---------------------------------------------------------
+
+  uint64_t bloom_offset = decode_from_le<uint64_t>(footer_bytes);
+
+  uint64_t bloom_size = decode_from_le<uint64_t>(footer_bytes + 8);
+
+  uint64_t index_offset = decode_from_le<uint64_t>(footer_bytes + 16);
+
+  uint64_t index_size = decode_from_le<uint64_t>(footer_bytes + 24);
+
+  uint32_t stored_checksum = decode_from_le<uint32_t>(footer_bytes + 32);
+
+  // ---------------------------------------------------------
+  // Recalculate CRC over the metadata only.
+  //
+  // CRC covers:
+  // [bloom_offset][bloom_size][index_offset][index_size]
+  //
+  // i.e. first 32 bytes.
+  // ---------------------------------------------------------
 
   uLong crc = crc32(0L, Z_NULL, 0);
 
-  crc = crc32(crc, reinterpret_cast<const Bytef *>(index_offset_buffer),
-              sizeof(index_offset_buffer));
+  crc = crc32(crc, reinterpret_cast<const Bytef *>(footer_bytes), 32);
 
-  crc = crc32(crc, reinterpret_cast<const Bytef *>(index_size_buffer),
-              sizeof(index_size_buffer));
+  uint32_t calculated_checksum = static_cast<uint32_t>(crc);
 
-  uint32_t calculated_crc = static_cast<uint32_t>(crc);
-
-  // CRC passed; index location metadata can now be trusted.
-  uint32_t stored_crc = decode_from_le<uint32_t>(footer_crc_buffer);
-
-  if (calculated_crc != stored_crc) {
-    throw std::runtime_error("Invalid SSTable footer CRC");
+  if (stored_checksum != calculated_checksum) {
+    throw std::runtime_error("SSTable footer checksum mismatch");
   }
 
-  uint64_t index_offset = decode_from_le<uint64_t>(index_offset_buffer);
-
-  uint64_t index_size = decode_from_le<uint64_t>(index_size_buffer);
-  return {index_offset, index_size};
+  return {bloom_offset, bloom_size, index_offset, index_size};
 }
 
 // loadSparseIndex(offset, size)
@@ -528,7 +655,108 @@ kronos::SstableReader::FooterInfo kronos::SstableReader::readFooter() {
 // 10. Ensure no unexplained bytes remain.
 //           ↓
 // sparse_index_ ready
+void kronos::SstableReader::loadBloomFilter(uint64_t bloom_offset,
+                                            uint64_t bloom_size) {
 
+  // Bloom block layout:
+  //
+  // [bit_count:u32]
+  // [probe_count:u32]
+  // [packed bits:N]
+  // [CRC32:u32]
+
+  // Minimum possible block:
+  // 4 bytes bit_count
+  // 4 bytes probe_count
+  // 4 bytes CRC
+  // = 12 bytes
+  if (bloom_size < 12) {
+    throw std::runtime_error("Invalid Bloom filter block size");
+  }
+
+  // Move to the beginning of the Bloom filter block.
+  if (::lseek(fd_, static_cast<off_t>(bloom_offset), SEEK_SET) == -1) {
+    throw std::runtime_error("Unable to seek to Bloom filter");
+  }
+
+  // Read the complete Bloom block.
+  std::vector<uint8_t> bloom_bytes(bloom_size);
+
+  read_exact(fd_, bloom_bytes.data(), bloom_bytes.size());
+
+  // ---------------------------------------------------------
+  // Decode metadata
+  // ---------------------------------------------------------
+
+  uint32_t bit_count = decode_from_le<uint32_t>(bloom_bytes.data());
+
+  uint32_t probe_count = decode_from_le<uint32_t>(bloom_bytes.data() + 4);
+
+  // ---------------------------------------------------------
+  // Verify CRC32
+  // ---------------------------------------------------------
+
+  // Last 4 bytes contain the checksum written by
+  // writeBloomFilter().
+  size_t checksum_offset = bloom_bytes.size() - 4;
+
+  uint32_t stored_checksum =
+      decode_from_le<uint32_t>(bloom_bytes.data() + checksum_offset);
+
+  // Calculate CRC over everything EXCEPT the stored CRC:
+  //
+  // [bit_count][probe_count][packed bits]
+  uLong crc = crc32(0L, Z_NULL, 0);
+
+  crc = crc32(crc, reinterpret_cast<const Bytef *>(bloom_bytes.data()),
+              static_cast<uInt>(checksum_offset));
+
+  uint32_t calculated_checksum = static_cast<uint32_t>(crc);
+
+  if (stored_checksum != calculated_checksum) {
+    throw std::runtime_error("Bloom filter checksum mismatch");
+  }
+
+  // ---------------------------------------------------------
+  // Extract packed Bloom bits
+  // ---------------------------------------------------------
+
+  // First 8 bytes:
+  // [bit_count][probe_count]
+  //
+  // Last 4 bytes:
+  // [CRC32]
+  //
+  // Everything between them is bits_.
+
+  auto bits_begin = bloom_bytes.begin() + 8;
+  auto bits_end = bloom_bytes.end() - 4;
+
+  std::vector<uint8_t> bits(bits_begin, bits_end);
+
+  // ---------------------------------------------------------
+  // Validate persisted state
+  // ---------------------------------------------------------
+
+  if (bit_count == 0 || probe_count == 0 || bits.empty()) {
+    throw std::runtime_error("Invalid Bloom filter metadata");
+  }
+
+  // The number of packed bytes should correspond exactly to
+  // ceil(bit_count / 8).
+  size_t expected_byte_count = (static_cast<size_t>(bit_count) + 7) / 8;
+
+  if (bits.size() != expected_byte_count) {
+    throw std::runtime_error("Invalid Bloom filter bit count");
+  }
+
+  // ---------------------------------------------------------
+  // Restore Bloom filter
+  // ---------------------------------------------------------
+
+  bloom_filter_.emplace(static_cast<size_t>(bit_count),
+                        static_cast<size_t>(probe_count), std::move(bits));
+}
 void kronos::SstableReader::loadSparseIndex(uint64_t index_offset,
                                             uint64_t index_size) {
   // EVen an empty sparse index has 8 bytes
@@ -687,6 +915,13 @@ kronos::SstableReader::GetResult
 kronos::SstableReader::get(const std::string &key) const {
 
   GetResult g = {.value = "", .status = GetStatus::NOT_FOUND};
+
+  // Bloom filter can prove that the key definitely does not exist.
+  if (bloom_filter_.has_value() && !bloom_filter_->mayContain(key)) {
+    return g;
+  }
+
+  // No data blocks exist in this SSTable.
   if (sparse_index_.empty()) {
     return g;
   }
@@ -881,7 +1116,7 @@ kronos::SstableReader::SstableReader(const std::filesystem::path &path) {
     readHeader();
 
     FooterInfo footer = readFooter();
-
+    loadBloomFilter(footer.bloom_offset, footer.bloom_size);
     loadSparseIndex(footer.index_offset, footer.index_size);
 
   } catch (...) {

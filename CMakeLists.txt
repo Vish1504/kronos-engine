@@ -161,21 +161,21 @@ target_link_libraries(
 # SSTable uses CRC32, so this target must link zlib.
 add_executable(
     sstable_test
-
     tests/sstable_test.cpp
     src/sstable.cpp
+    src/bloom_filter.cpp
+    src/third_party/murmurhash3/MurmurHash3.cpp
 )
 
 target_include_directories(
     sstable_test
-
     PRIVATE
     include
+    src
 )
 
 target_link_libraries(
     sstable_test
-
     PRIVATE
     ZLIB::ZLIB
 )

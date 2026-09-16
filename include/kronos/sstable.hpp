@@ -8,7 +8,7 @@
 #include <optional>
 #include <string>
 #include <vector>
-
+// SparseIndexEntry is shared by both SstableBuilder and SstableReader.
 /*
 SSTable format:
 
@@ -25,10 +25,8 @@ SSTable format:
 
 [ FOOTER ]
 */
-
 namespace kronos {
 
-// SparseIndexEntry is shared by both SstableBuilder and SstableReader.
 struct SparseIndexEntry {
   std::string firstKey;
 

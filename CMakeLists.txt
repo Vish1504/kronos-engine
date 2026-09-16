@@ -163,6 +163,7 @@ add_executable(
     sstable_test
     tests/sstable_test.cpp
     src/sstable.cpp
+    src/memtable.cpp
     src/bloom_filter.cpp
     src/third_party/murmurhash3/MurmurHash3.cpp
 )

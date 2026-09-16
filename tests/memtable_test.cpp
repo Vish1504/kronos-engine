@@ -97,6 +97,71 @@ void test_remove_missing_key_creates_tombstone() {
   std::cout << "PASS: missing-key remove creates tombstone\n";
 }
 
+void test_newer_put_replaces_tombstone() {
+  kronos::Memtable memtable(1024);
+
+  // Arrange
+  auto put_result = memtable.put("A", "Harry", 10);
+  assert(put_result == kronos::Memtable::WriteResult::SUCCESS);
+
+  auto delete_result = memtable.remove("A", 20);
+  assert(delete_result == kronos::Memtable::WriteResult::SUCCESS);
+
+  // Act
+  auto result = memtable.put("A", "Vishnu", 30);
+
+  // Assert
+  assert(result == kronos::Memtable::WriteResult::SUCCESS);
+
+  auto get_result = memtable.get("A");
+
+  assert(get_result.status == kronos::GetStatus::FOUND);
+  assert(get_result.value == "Vishnu");
+
+  std::cout << "PASS: newer PUT replaces tombstone\n";
+}
+
+void test_older_put_cannot_replace_tombstone() {
+  kronos::Memtable memtable(1024);
+
+  // Arrange
+  auto delete_result = memtable.remove("A", 20);
+  assert(delete_result == kronos::Memtable::WriteResult::SUCCESS);
+
+  // Act
+  auto result = memtable.put("A", "Harry", 10);
+
+  // Assert
+  assert(result == kronos::Memtable::WriteResult::OLDER_SEQUENCE);
+
+  auto get_result = memtable.get("A");
+
+  assert(get_result.status == kronos::GetStatus::DELETED);
+
+  std::cout << "PASS: older PUT cannot replace tombstone\n";
+}
+
+void test_older_delete_cannot_replace_newer_put() {
+  kronos::Memtable memtable(1024);
+
+  // Arrange
+  auto put_result = memtable.put("A", "Vishnu", 20);
+  assert(put_result == kronos::Memtable::WriteResult::SUCCESS);
+
+  // Act
+  auto result = memtable.remove("A", 10);
+
+  // Assert
+  assert(result == kronos::Memtable::WriteResult::OLDER_SEQUENCE);
+
+  auto get_result = memtable.get("A");
+
+  assert(get_result.status == kronos::GetStatus::FOUND);
+  assert(get_result.value == "Vishnu");
+
+  std::cout << "PASS: older DELETE cannot replace newer PUT\n";
+}
+
 void test_not_found() {
   kronos::Memtable memtable(1024);
 
@@ -234,6 +299,9 @@ int main() {
   test_would_exceed_target();
   test_iterator_order();
   test_empty_iterator();
+  test_newer_put_replaces_tombstone();
+  test_older_put_cannot_replace_tombstone();
+  test_older_delete_cannot_replace_newer_put();
 
   std::cout << "\nAll Memtable tests passed.\n";
 

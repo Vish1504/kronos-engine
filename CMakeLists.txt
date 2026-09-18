@@ -63,6 +63,8 @@ add_executable(
     src/sstable.cpp
     src/bloom_filter.cpp
     src/compactor.cpp
+    src/manifest.cpp
+    src/compaction_policy.cpp
 
     # Third-party hashing implementation used by BloomFilter
     src/third_party/murmurhash3/MurmurHash3.cpp
@@ -320,4 +322,55 @@ target_link_libraries(
     PRIVATE
 
     ZLIB::ZLIB
+)
+
+# =========================================================
+# MANIFEST TEST
+# =========================================================
+
+# Verifies authoritative SSTable state transitions.
+#
+# Important cases:
+#   - state persists across reload
+#   - merely-created SSTable is not automatically live
+#   - compaction edit removes old files and adds output
+#   - compaction may legitimately produce no output file
+
+add_executable(
+    manifest_test
+
+    tests/manifest_test.cpp
+    src/manifest.cpp
+)
+
+target_include_directories(
+    manifest_test
+    PRIVATE
+
+    include
+)
+
+
+# =========================================================
+# COMPACTION POLICY TEST
+# =========================================================
+
+# Verifies the v1 leveled-compaction policy:
+#
+#   - L0 file-count threshold
+#   - all L0 files selected
+#   - only overlapping L1 files selected
+#   - tombstone GC allowed only when L1 is bottom level
+add_executable(
+    compaction_policy_test
+
+    tests/compaction_policy_test.cpp
+    src/compaction_policy.cpp
+)
+
+target_include_directories(
+    compaction_policy_test
+    PRIVATE
+
+    include
 )

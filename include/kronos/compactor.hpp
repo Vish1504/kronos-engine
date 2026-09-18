@@ -13,7 +13,7 @@ public:
   CompactionResult
   compact(const std::vector<std::filesystem::path> &input_files,
           const std::filesystem::path &output_path, size_t block_size,
-          size_t bits_per_key);
+          size_t bits_per_key, bool can_drop_tombstones = false);
 
 private:
   struct HeapItem {

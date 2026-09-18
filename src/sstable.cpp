@@ -83,10 +83,9 @@ void write_all(int fd, const void *data, size_t size) {
 // Build into a .tmp file so an incomplete SSTable is never mistaken for a
 // successfully finalized table.
 kronos::SstableBuilder::SstableBuilder(const std::filesystem::path &path,
-                                       size_t blockSize, size_t bitsPerKey,
-                                       size_t keyCount)
+                                       size_t blockSize, size_t bitsPerKey)
     : sstable_path_(path), target_blockSize_(blockSize),
-      bloom_filter_(bitsPerKey, keyCount) {
+      bits_per_key_(bitsPerKey) {
 
   sstable_path_ = path;
   target_blockSize_ = blockSize;
@@ -134,7 +133,7 @@ void kronos::SstableBuilder::writeHeader() {
 // Serialize one logical Memtable entry into the SSTable record format.
 // [sequence:8][operation:1][key_len:4][value_len:4][key][value]
 void kronos::SstableBuilder::add(std::string key, InternalEntry e) {
-  bloom_filter_.add(key);
+  bloom_keys_.push_back(key);
   uint8_t sequence_bytes[8];
   encode_to_le(sequence_bytes, e.sequence);
 
@@ -257,20 +256,20 @@ void kronos::SstableBuilder::flushCurrentBlock() {
 void kronos::SstableBuilder::writeBloomFilter() {
   std::vector<uint8_t> bloom_block;
 
-  uint32_t bit_count = static_cast<uint32_t>(bloom_filter_.bitCount());
+  uint32_t bit_count = static_cast<uint32_t>(bloom_filter_->bitCount());
 
   uint8_t bit_count_bytes[4];
   encode_to_le(bit_count_bytes, bit_count);
   bloom_block.insert(bloom_block.end(), bit_count_bytes, bit_count_bytes + 4);
 
-  uint32_t probe_count = static_cast<uint32_t>(bloom_filter_.probeCount());
+  uint32_t probe_count = static_cast<uint32_t>(bloom_filter_->probeCount());
   uint8_t probe_count_bytes[4];
   encode_to_le(probe_count_bytes, probe_count);
   bloom_block.insert(bloom_block.end(), probe_count_bytes,
                      probe_count_bytes + 4);
 
   // append the Bloom filter's packed bits
-  const auto &bits = bloom_filter_.bits();
+  const auto &bits = bloom_filter_->bits();
   bloom_block.insert(bloom_block.end(), bits.begin(), bits.end());
 
   // Now we calculate CRC32 over [entry_count][all index entries]
@@ -423,11 +422,16 @@ void kronos::SstableBuilder::finish() {
 
   // add() may have left one partially filled block in RAM.
   flushCurrentBlock();
-
+  if (bloom_keys_.empty()) {
+    throw std::invalid_argument("Cannot create an empty SSTable");
+  }
   // ---------------------------------------------------------
   // BLOOM FILTER
   // ---------------------------------------------------------
-
+  bloom_filter_.emplace(bits_per_key_, bloom_keys_.size());
+  for (size_t i = 0; i < bloom_keys_.size(); i++) {
+    bloom_filter_->add(bloom_keys_[i]);
+  }
   // Current file position is where the Bloom filter will begin.
   off_t bloom_offset_pos = ::lseek(fd_, 0, SEEK_CUR);
 

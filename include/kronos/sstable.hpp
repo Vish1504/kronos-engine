@@ -38,7 +38,7 @@ class SstableBuilder {
 
 public:
   explicit SstableBuilder(const std::filesystem::path &path, size_t blockSize,
-                          size_t bitsPerKey, size_t keyCount);
+                          size_t bitsPerKey);
 
   ~SstableBuilder();
 
@@ -60,6 +60,8 @@ private:
   std::vector<uint8_t> current_block_;
 
   std::vector<SparseIndexEntry> sparse_index_;
+  size_t bits_per_key_;
+  std::vector<std::string> bloom_keys_;
 
   int fd_ = -1;
 
@@ -94,7 +96,7 @@ private:
                    uint64_t index_offset, uint64_t index_size);
 
   // Bloom filter belonging to this SSTable.
-  bloom_filter bloom_filter_;
+  std::optional<bloom_filter> bloom_filter_;
 };
 
 class SstableReader {

@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
+#include <vector>
 
 namespace kronos {
 
@@ -23,4 +25,10 @@ struct GetResult {
   std::string value;
   GetStatus status;
 };
+struct CompactionResult {
+  std::vector<std::filesystem::path> input_files;
+  std::vector<std::filesystem::path> output_files;
+};
+
+
 } // namespace kronos

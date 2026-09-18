@@ -1,10 +1,12 @@
 #include "kronos/memtable.hpp"
 #include "kronos/sstable.hpp"
+
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -36,7 +38,7 @@ int main() {
 
     {
       // Small target deliberately forces multiple data blocks.
-      SstableBuilder builder(path, 64, 10, 5);
+      SstableBuilder builder(path, 64, 10);
 
       builder.add("apple", InternalEntry{.value = "red",
                                          .sequence = 1,
@@ -177,28 +179,43 @@ int main() {
                 << std::endl;
     }
 
+    // ============================================================
+    // EMPTY SSTABLE CREATION MUST BE REJECTED
+    // ============================================================
+
     {
       const std::filesystem::path empty_path = "empty_sstable_test.sst";
 
-      std::filesystem::remove(empty_path);
+      auto empty_temp_path = empty_path;
+      empty_temp_path.replace_extension(".tmp");
 
-      {
-        SstableBuilder builder(empty_path, 64, 10, 1);
+      std::filesystem::remove(empty_path);
+      std::filesystem::remove(empty_temp_path);
+
+      bool empty_sstable_rejected = false;
+
+      try {
+        SstableBuilder builder(empty_path, 64, 10);
+
+        // No records are added.
         builder.finish();
+
+      } catch (const std::invalid_argument &) {
+        empty_sstable_rejected = true;
       }
 
-      {
-        SstableReader reader(empty_path);
+      require(empty_sstable_rejected,
+              "SstableBuilder should reject an empty SSTable");
 
-        auto it = reader.getIterator();
+      require(!std::filesystem::exists(empty_path),
+              "empty SSTable should not produce a final .sst file");
 
-        require(!it.valid(), "Iterator over empty SSTable should be invalid");
-      }
+      // Clean up any temporary file left behind after the rejected finish.
+      std::filesystem::remove(empty_temp_path);
 
-      std::filesystem::remove(empty_path);
-
-      std::cout << "PASS: Empty SSTable Iterator is invalid" << std::endl;
+      std::cout << "PASS: Empty SSTable creation rejected" << std::endl;
     }
+
     // ============================================================
     // MEMTABLE TOMBSTONE -> SSTABLE INTEGRATION TEST
     // ============================================================
@@ -220,10 +237,12 @@ int main() {
       Memtable memtable(1024);
 
       auto put_result = memtable.put("A", "Harry", 10);
+
       require(put_result == Memtable::WriteResult::SUCCESS,
               "initial PUT should succeed");
 
       auto delete_result = memtable.remove("A", 20);
+
       require(delete_result == Memtable::WriteResult::SUCCESS,
               "DELETE should succeed");
 
@@ -239,7 +258,7 @@ int main() {
       // ----------------------------------------------------------
 
       {
-        SstableBuilder builder(tombstone_path, 64, 10, memtable.entry_count());
+        SstableBuilder builder(tombstone_path, 64, 10);
 
         auto it = memtable.getIterator();
 
@@ -270,9 +289,11 @@ int main() {
       std::cout << "PASS: Memtable tombstone survived SSTable flush"
                 << std::endl;
     }
+
     // ============================================================
     // 3. CORRUPTION TEST
     // ============================================================
+
     //
     // Header = 8 bytes.
     // First data block begins immediately afterward.

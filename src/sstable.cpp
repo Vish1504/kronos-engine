@@ -133,7 +133,12 @@ void kronos::SstableBuilder::writeHeader() {
 // Serialize one logical Memtable entry into the SSTable record format.
 // [sequence:8][operation:1][key_len:4][value_len:4][key][value]
 void kronos::SstableBuilder::add(std::string key, InternalEntry e) {
-  bloom_keys_.push_back(key);
+
+  // SSTable keys must be unique and strictly increasing.
+  if (last_key_.has_value() && key <= *last_key_) {
+    throw std::invalid_argument("SSTable keys must be strictly increasing");
+  }
+
   uint8_t sequence_bytes[8];
   encode_to_le(sequence_bytes, e.sequence);
 
@@ -142,6 +147,7 @@ void kronos::SstableBuilder::add(std::string key, InternalEntry e) {
 
   // key length - 64 bit to 32 bit
   uint32_t keyLength = static_cast<uint32_t>(key.size());
+
   // value length - 64 bit to 32 bit
   uint32_t valueLength = static_cast<uint32_t>(e.value.size());
 
@@ -156,11 +162,15 @@ void kronos::SstableBuilder::add(std::string key, InternalEntry e) {
 
   record_bytes.insert(record_bytes.end(), sequence_bytes,
                       sequence_bytes + sizeof(e.sequence));
+
   record_bytes.push_back(operation_byte);
+
   record_bytes.insert(record_bytes.end(), key_length_bytes,
                       key_length_bytes + sizeof(keyLength));
+
   record_bytes.insert(record_bytes.end(), value_length_bytes,
                       value_length_bytes + sizeof(valueLength));
+
   for (char c : key) {
     record_bytes.push_back(static_cast<uint8_t>(c));
   }
@@ -176,12 +186,20 @@ void kronos::SstableBuilder::add(std::string key, InternalEntry e) {
 
     flushCurrentBlock();
   }
+
   if (current_block_.size() == 0) {
     currentBlock_firstKey_ = key;
   }
+
   current_block_.insert(current_block_.end(), record_bytes.begin(),
                         record_bytes.end());
+
   currentBlock_recordCount_++;
+
+  bloom_keys_.push_back(key);
+
+  // Remember the final key successfully added to the SSTable.
+  last_key_ = key;
 }
 
 // Finalize the current RAM block and append it to the SSTable file.

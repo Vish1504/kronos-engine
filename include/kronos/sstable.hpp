@@ -97,6 +97,7 @@ private:
 
   // Bloom filter belonging to this SSTable.
   std::optional<bloom_filter> bloom_filter_;
+  std::optional<std::string> last_key_;
 };
 
 class SstableReader {

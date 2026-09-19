@@ -180,6 +180,77 @@ int main() {
     }
 
     // ============================================================
+    // DUPLICATE KEY REJECTION TEST
+    // ============================================================
+
+    {
+      const std::filesystem::path duplicate_path =
+          "sstable_duplicate_key_test.sst";
+
+      std::filesystem::remove(duplicate_path);
+
+      bool duplicate_rejected = false;
+
+      try {
+        SstableBuilder builder(duplicate_path, 64, 10);
+
+        builder.add("apple", InternalEntry{.value = "red",
+                                           .sequence = 1,
+                                           .operation = OperationType::PUT});
+
+        builder.add("apple", InternalEntry{.value = "green",
+                                           .sequence = 2,
+                                           .operation = OperationType::PUT});
+
+      } catch (const std::invalid_argument &) {
+        duplicate_rejected = true;
+      }
+
+      require(duplicate_rejected,
+              "SstableBuilder should reject duplicate keys");
+
+      std::filesystem::remove(duplicate_path);
+
+      std::cout << "PASS: SSTableBuilder rejects duplicate keys" << std::endl;
+    }
+
+    // ============================================================
+    // OUT-OF-ORDER KEY REJECTION TEST
+    // ============================================================
+
+    {
+      const std::filesystem::path unsorted_path =
+          "sstable_unsorted_key_test.sst";
+
+      std::filesystem::remove(unsorted_path);
+
+      bool unsorted_rejected = false;
+
+      try {
+        SstableBuilder builder(unsorted_path, 64, 10);
+
+        builder.add("banana", InternalEntry{.value = "yellow",
+                                            .sequence = 1,
+                                            .operation = OperationType::PUT});
+
+        builder.add("apple", InternalEntry{.value = "red",
+                                           .sequence = 2,
+                                           .operation = OperationType::PUT});
+
+      } catch (const std::invalid_argument &) {
+        unsorted_rejected = true;
+      }
+
+      require(unsorted_rejected,
+              "SstableBuilder should reject out-of-order keys");
+
+      std::filesystem::remove(unsorted_path);
+
+      std::cout << "PASS: SSTableBuilder rejects out-of-order keys"
+                << std::endl;
+    }
+
+    // ============================================================
     // EMPTY SSTABLE CREATION MUST BE REJECTED
     // ============================================================
 

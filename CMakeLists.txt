@@ -35,6 +35,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # ---------------------------------------------------------
 find_package(ZLIB REQUIRED)
 
+find_package(Threads REQUIRED)
+
 
 # =========================================================
 # MAIN KRONOS EXECUTABLE
@@ -373,4 +375,39 @@ target_include_directories(
     PRIVATE
 
     include
+)
+
+# =========================================================
+# THREAD-SAFE QUEUE TEST
+# =========================================================
+# Verifies the producer-consumer queue used by the
+# background maintenance worker.
+#
+# Important cases:
+#   - push/pop
+#   - FIFO ordering
+#   - blocked consumer wakes when work arrives
+#   - blocked consumer wakes during shutdown
+#   - accepted tasks drain before shutdown completes
+#   - pushes are rejected after shutdown begins
+#
+# thread_safe_queue is a template and is implemented
+# entirely in its header, so no .cpp source is required.
+# =========================================================
+
+add_executable(
+    thread_safe_queue_test
+    tests/thread_safe_queue_test.cpp
+)
+
+target_include_directories(
+    thread_safe_queue_test
+    PRIVATE
+    include
+)
+
+target_link_libraries(
+    thread_safe_queue_test
+    PRIVATE
+    Threads::Threads
 )

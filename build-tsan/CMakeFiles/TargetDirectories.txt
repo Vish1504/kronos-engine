@@ -1,0 +1,12 @@
+/Users/vish1504/Developer/kronos-engine/build-tsan/CMakeFiles/kronos.dir
+/Users/vish1504/Developer/kronos-engine/build-tsan/CMakeFiles/memtable_test.dir
+/Users/vish1504/Developer/kronos-engine/build-tsan/CMakeFiles/wal_memtable_test.dir
+/Users/vish1504/Developer/kronos-engine/build-tsan/CMakeFiles/sstable_test.dir
+/Users/vish1504/Developer/kronos-engine/build-tsan/CMakeFiles/bloom_filter_test.dir
+/Users/vish1504/Developer/kronos-engine/build-tsan/CMakeFiles/compactor_test.dir
+/Users/vish1504/Developer/kronos-engine/build-tsan/CMakeFiles/manifest_test.dir
+/Users/vish1504/Developer/kronos-engine/build-tsan/CMakeFiles/compaction_policy_test.dir
+/Users/vish1504/Developer/kronos-engine/build-tsan/CMakeFiles/thread_safe_queue_test.dir
+/Users/vish1504/Developer/kronos-engine/build-tsan/CMakeFiles/engine_test.dir
+/Users/vish1504/Developer/kronos-engine/build-tsan/CMakeFiles/edit_cache.dir
+/Users/vish1504/Developer/kronos-engine/build-tsan/CMakeFiles/rebuild_cache.dir

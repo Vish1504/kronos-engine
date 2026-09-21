@@ -67,6 +67,7 @@ add_executable(
     src/compactor.cpp
     src/manifest.cpp
     src/compaction_policy.cpp
+    src/engine.cpp
 
     # Third-party hashing implementation used by BloomFilter
     src/third_party/murmurhash3/MurmurHash3.cpp
@@ -411,3 +412,96 @@ target_link_libraries(
     PRIVATE
     Threads::Threads
 )
+
+# =========================================================
+# KRONOS ENGINE / MODULE 8 CONCURRENCY TEST
+# =========================================================
+# Verifies the integrated foreground/background engine path:
+#
+#   - put/get/remove through KronosEngine
+#   - active -> immutable Memtable rotation
+#   - background L0 flush
+#   - graceful shutdown queue draining
+#   - L0 -> L1 background compaction
+#   - concurrent foreground reads while maintenance runs
+#
+# This target intentionally compiles the required engine source
+# files directly, matching the existing per-test CMake style.
+# =========================================================
+
+add_executable(
+    engine_test
+
+    tests/engine_test.cpp
+
+    src/engine.cpp
+    src/config.cpp
+    src/wal.cpp
+    src/memtable.cpp
+    src/sstable.cpp
+    src/bloom_filter.cpp
+    src/manifest.cpp
+    src/compactor.cpp
+    src/compaction_policy.cpp
+
+    src/third_party/murmurhash3/MurmurHash3.cpp
+)
+
+target_include_directories(
+    engine_test
+    PRIVATE
+
+    include
+    src
+)
+
+target_link_libraries(
+    engine_test
+    PRIVATE
+
+    ZLIB::ZLIB
+    Threads::Threads
+)
+
+# =========================================================
+# THREADSANITIZER
+# =========================================================
+#
+# Optional race-condition detection for the Module 8
+# concurrency/integration tests.
+#
+# Enable with:
+#
+#   cmake -S . -B build-tsan -DKRONOS_ENABLE_TSAN=ON
+#
+# This is kept off for normal builds because sanitizer
+# instrumentation adds substantial runtime overhead.
+# =========================================================
+
+option(
+    KRONOS_ENABLE_TSAN
+    "Enable ThreadSanitizer for Kronos concurrency tests"
+    OFF
+)
+
+if(KRONOS_ENABLE_TSAN)
+
+    message(STATUS "ThreadSanitizer enabled for engine_test")
+
+    target_compile_options(
+        engine_test
+        PRIVATE
+
+        -fsanitize=thread
+        -fno-omit-frame-pointer
+        -g
+    )
+
+    target_link_options(
+        engine_test
+        PRIVATE
+
+        -fsanitize=thread
+    )
+
+endif()

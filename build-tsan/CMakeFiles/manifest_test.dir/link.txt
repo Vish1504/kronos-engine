@@ -1,0 +1,1 @@
+/usr/bin/c++ -g -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/manifest_test.dir/tests/manifest_test.cpp.o CMakeFiles/manifest_test.dir/src/manifest.cpp.o -o manifest_test

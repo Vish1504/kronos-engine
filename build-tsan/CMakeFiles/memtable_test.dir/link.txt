@@ -1,0 +1,1 @@
+/usr/bin/c++ -g -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/memtable_test.dir/tests/memtable_test.cpp.o CMakeFiles/memtable_test.dir/src/memtable.cpp.o -o memtable_test

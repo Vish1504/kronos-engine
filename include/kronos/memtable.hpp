@@ -1,7 +1,85 @@
+// #pragma once
+// #include "kronos/types.hpp"
+// #include <iostream>
+// #include <map>
+// #include <string>
+// namespace kronos {
+// class Memtable {
+// public:
+//   // enum class OperationType : uint8_t { DELETE = 0, PUT = 1 };
+//   enum class MemTableState : uint8_t {
+//     IMMUTABLE = 0,
+//     MUTABLE = 1
+//   }; // Can this Memtable be modified?
+//   enum class WriteResult : uint8_t {
+//     // write was accepted
+//     SUCCESS = 0,
+//     // this Memtable is frozen; Chronos should use the active Memtable
+//     IMMUTABLE = 1,
+//     // incoming record is older than the version already stored
+//     OLDER_SEQUENCE = 2
+//   };
+
+//   using GetStatus = kronos::GetStatus; // from types.hpp
+//                                        // What happened when I look for a
+//                                        key?
+//   using Entry = InternalEntry;
+//   // struct Entry { // information sotred for each key
+//   //   std::string value;
+//   //   uint64_t sequence;
+//   //   OperationType operation;
+//   // };
+
+//   using GetResult = kronos::GetResult; // from types.hpp
+
+//   explicit Memtable(size_t target_bytes)
+//       : memory_usage_(0), target_bytes_(target_bytes),
+//         state_(MemTableState::MUTABLE){
+
+//         };
+//   WriteResult put(const std::string &key, const std::string &value,
+//                   uint64_t sequence);
+//   WriteResult remove(const std::string &key, uint64_t sequence);
+//   GetResult get(const std::string &key) const; // Read only
+//   size_t entry_count() const; // for total count of enteries on the memtable
+//   size_t getMemory_usage() const;
+//   MemTableState GetState() const;
+//   bool freeze();
+//   bool would_exceed_target(const std::string &key,
+//                            const Entry &new_entry)
+//       const; // if true, freeze current Memtable and create new active
+//       Memtable
+//   class Iterator {
+//   public:
+//     Iterator(std::map<std::string, Entry>::const_iterator current,
+//              std::map<std::string, Entry>::const_iterator end)
+//         : it_curr(current), it_end(end){};
+//     bool valid() const;             // to check if current != end
+//     const std::string &key() const; // to return key at current point
+//     const Entry &entry() const;     // to return entry at current point
+//     void next();                    // go to next key
+
+//   private:
+//     std::map<std::string, Entry>::const_iterator
+//         it_curr; // current read only iterator
+//     std::map<std::string, Entry>::const_iterator it_end; // end iterator
+//   };
+//   Iterator getIterator() const;
+
+// private:
+//   std::map<std::string, Entry> Mtable_;
+//   size_t memory_usage_;
+//   size_t target_bytes_;
+//   MemTableState state_;
+// };
+
+// } // namespace kronos
+
 #pragma once
 #include "kronos/types.hpp"
 #include <iostream>
 #include <map>
+#include <optional>
 #include <string>
 namespace kronos {
 class Memtable {
@@ -30,7 +108,7 @@ public:
   // };
 
   using GetResult = kronos::GetResult; // from types.hpp
-  
+
   explicit Memtable(size_t target_bytes)
       : memory_usage_(0), target_bytes_(target_bytes),
         state_(MemTableState::MUTABLE){
@@ -40,6 +118,7 @@ public:
                   uint64_t sequence);
   WriteResult remove(const std::string &key, uint64_t sequence);
   GetResult get(const std::string &key) const; // Read only
+  std::optional<Entry> lookupEntry(const std::string &key) const;
   size_t entry_count() const; // for total count of enteries on the memtable
   size_t getMemory_usage() const;
   MemTableState GetState() const;

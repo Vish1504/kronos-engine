@@ -1,3 +1,10 @@
+// Memtable is NOT internally thread-safe.
+//
+// Mutable Memtables must be externally synchronized by the caller (e.g.,
+// KronosEngine). Once freeze() is called, the Memtable becomes permanently
+// immutable and may be safely read concurrently across multiple threads without
+// locks, provided its lifetime is maintained via a shared_ptr snapshot.
+
 #include <kronos/memtable.hpp>
 
 // Estimates the memory occupied by one key-entry pair.
@@ -107,19 +114,36 @@ kronos::Memtable::WriteResult kronos::Memtable::remove(const std::string &key,
   return WriteResult::SUCCESS;
 }
 
-kronos::Memtable::GetResult
-kronos::Memtable::get(const std::string &key) const {
+std::optional<kronos::Memtable::Entry>
+kronos::Memtable::lookupEntry(const std::string &key) const {
 
   auto it = Mtable_.find(key);
 
-  if (it != Mtable_.end()) {
-    if (it->second.operation == OperationType ::DELETE) {
-      return {it->second.value, GetStatus ::DELETED};
-    }
-    return {it->second.value, GetStatus ::FOUND};
+  if (it == Mtable_.end()) {
+    return std::nullopt;
   }
 
-  return {"", GetStatus ::NOT_FOUND};
+  // Return a copy rather than a reference. Engine-level callers can safely
+  // carry the result beyond the lookup without depending on the map node's
+  // lifetime. Active-Memtable callers synchronize externally; immutable
+  // Memtables are never modified.
+  return it->second;
+}
+
+kronos::Memtable::GetResult
+kronos::Memtable::get(const std::string &key) const {
+
+  auto entry = lookupEntry(key);
+
+  if (!entry.has_value()) {
+    return {"", GetStatus::NOT_FOUND};
+  }
+
+  if (entry->operation == OperationType::DELETE) {
+    return {"", GetStatus::DELETED};
+  }
+
+  return {entry->value, GetStatus::FOUND};
 }
 
 size_t kronos::Memtable::entry_count() const { return Mtable_.size(); }

@@ -1,0 +1,1 @@
+/usr/bin/c++ -g -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/compaction_policy_test.dir/tests/compaction_policy_test.cpp.o CMakeFiles/compaction_policy_test.dir/src/compaction_policy.cpp.o -o compaction_policy_test

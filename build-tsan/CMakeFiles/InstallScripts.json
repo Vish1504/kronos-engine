@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/vish1504/Developer/kronos-engine/build-tsan/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

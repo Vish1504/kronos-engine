@@ -9,6 +9,7 @@ cmake_minimum_required(VERSION 3.20)
 # ---------------------------------------------------------
 project(KronosEngine)
 
+enable_testing()
 
 # ---------------------------------------------------------
 # C++ Standard
@@ -154,6 +155,8 @@ target_include_directories(
     include
 )
 
+add_test(NAME memtable_test COMMAND memtable_test)
+
 
 # =========================================================
 # WAL -> MEMTABLE INTEGRATION TEST
@@ -192,6 +195,7 @@ target_link_libraries(
     ZLIB::ZLIB
 )
 
+add_test(NAME wal_memtable_test COMMAND wal_memtable_test)
 
 # =========================================================
 # SSTABLE TEST
@@ -237,7 +241,7 @@ target_link_libraries(
 
     ZLIB::ZLIB
 )
-
+add_test(NAME sstable_test COMMAND sstable_test)
 
 # =========================================================
 # BLOOM FILTER UNIT TEST
@@ -270,7 +274,7 @@ target_include_directories(
     src
 )
 
-
+add_test(NAME bloom_filter_test COMMAND bloom_filter_test)
 # =========================================================
 # COMPACTOR TEST
 # =========================================================
@@ -327,6 +331,7 @@ target_link_libraries(
 
     ZLIB::ZLIB
 )
+add_test(NAME compactor_test COMMAND compactor_test)
 
 # =========================================================
 # MANIFEST TEST
@@ -354,6 +359,7 @@ target_include_directories(
     include
 )
 
+add_test(NAME manifest_test COMMAND manifest_test)
 
 # =========================================================
 # COMPACTION POLICY TEST
@@ -378,6 +384,8 @@ target_include_directories(
 
     include
 )
+
+add_test(NAME compaction_policy_test COMMAND compaction_policy_test)
 
 # =========================================================
 # THREAD-SAFE QUEUE TEST
@@ -413,6 +421,8 @@ target_link_libraries(
     PRIVATE
     Threads::Threads
 )
+
+add_test(NAME thread_safe_queue_test COMMAND thread_safe_queue_test)
 
 # =========================================================
 # KRONOS ENGINE / MODULE 8 CONCURRENCY TEST
@@ -463,6 +473,8 @@ target_link_libraries(
     ZLIB::ZLIB
     Threads::Threads
 )
+
+add_test(NAME engine_test COMMAND engine_test)
 
 # =========================================================
 # THREADSANITIZER

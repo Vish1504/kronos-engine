@@ -34,6 +34,15 @@ constexpr std::size_t FIXED_RECORD_PREFIX_SIZE =
 
 constexpr std::size_t CRC_SIZE = sizeof(uint32_t);
 
+std::filesystem::path testWalPath(const std::string &filename) {
+  const auto directory =
+      std::filesystem::temp_directory_path() / "kronos_wal_tests";
+
+  std::filesystem::create_directories(directory);
+
+  return directory / filename;
+}
+
 std::size_t recordSize(const std::string &key, const std::string &value) {
   return FIXED_RECORD_PREFIX_SIZE + key.size() + value.size() + CRC_SIZE;
 }
@@ -166,7 +175,7 @@ void rewriteSequenceWithValidCrc(const std::filesystem::path &path,
 }
 
 void testNormalRecovery() {
-  const std::filesystem::path wal_path = "tests/integration_test.wal";
+  const std::filesystem::path wal_path = testWalPath("integration_test.wal");
 
   std::filesystem::remove(wal_path);
 
@@ -232,7 +241,8 @@ void testNormalRecovery() {
 }
 
 void testIncompleteFinalRecordRepair() {
-  const std::filesystem::path wal_path = "tests/wal_truncated_tail_test.wal";
+  const std::filesystem::path wal_path =
+      testWalPath("wal_truncated_tail_test.wal");
 
   std::filesystem::remove(wal_path);
 
@@ -301,7 +311,8 @@ void testIncompleteFinalRecordRepair() {
 }
 
 void testCrcCorruptionFailsRecovery() {
-  const std::filesystem::path wal_path = "tests/wal_crc_corruption_test.wal";
+  const std::filesystem::path wal_path =
+      testWalPath("wal_crc_corruption_test.wal");
 
   std::filesystem::remove(wal_path);
 
@@ -350,7 +361,8 @@ void testCrcCorruptionFailsRecovery() {
 }
 
 void testAbsurdLengthDoesNotAllocate() {
-  const std::filesystem::path wal_path = "tests/wal_length_corruption_test.wal";
+  const std::filesystem::path wal_path =
+      testWalPath("wal_length_corruption_test.wal");
 
   std::filesystem::remove(wal_path);
 
@@ -424,7 +436,7 @@ void testAbsurdLengthDoesNotAllocate() {
 
 void testNonIncreasingSequenceFailsRecovery() {
   const std::filesystem::path wal_path =
-      "tests/wal_sequence_corruption_test.wal";
+      testWalPath("wal_sequence_corruption_test.wal");
 
   std::filesystem::remove(wal_path);
 

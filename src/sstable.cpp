@@ -987,6 +987,30 @@ void kronos::SstableReader::loadSparseIndex(uint64_t index_offset,
   }
 }
 
+void pread_exact(int fd, void *buffer, size_t size, off_t offset) {
+
+  auto *bytes = static_cast<uint8_t *>(buffer);
+
+  size_t total_read = 0;
+
+  while (total_read < size) {
+
+    const ssize_t result = ::pread(fd, bytes + total_read, size - total_read,
+                                   offset + static_cast<off_t>(total_read));
+
+    if (result < 0) {
+      throw std::runtime_error("Failed to read SSTable data block");
+    }
+
+    if (result == 0) {
+      throw std::runtime_error(
+          "Unexpected EOF while reading SSTable data block");
+    }
+
+    total_read += static_cast<size_t>(result);
+  }
+}
+
 /*
  * Point lookup:
  *
@@ -1026,12 +1050,10 @@ kronos::SstableReader::lookupEntry(const std::string &key) const {
   uint64_t target_block_offset = sparse_index_[target_id].block_offset;
   uint32_t target_block_size = sparse_index_[target_id].block_size;
 
-  if (::lseek(fd_, static_cast<off_t>(target_block_offset), SEEK_SET) == -1) {
-    throw std::runtime_error("Failed to seek to SSTable data block");
-  }
-
   std::vector<uint8_t> block_bytes(target_block_size);
-  read_exact(fd_, block_bytes.data(), block_bytes.size());
+
+  pread_exact(fd_, block_bytes.data(), block_bytes.size(),
+              static_cast<off_t>(target_block_offset));
 
   if (block_bytes.size() < sizeof(uint32_t)) {
     throw std::runtime_error("Corrupted SSTable data block");

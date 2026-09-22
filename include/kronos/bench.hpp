@@ -13,7 +13,7 @@ namespace kronos {
 enum class WorkloadType { WRITE, READ };
 
 struct BenchmarkConfig {
-  size_t operation_count = 100'000;
+  size_t operation_count = 25000;
   size_t value_size = 256;
 };
 
@@ -30,8 +30,10 @@ struct BenchmarkResult {
 
 std::vector<std::pair<std::string, std::string>>
 generateWorkload(size_t operation_count, size_t value_size);
-
 BenchmarkResult runWriteBenchmark(KronosEngine &engine,
                                   const BenchmarkConfig &config);
+
+BenchmarkResult runReadBenchmark(KronosEngine &engine,
+                                 const BenchmarkConfig &config);
 
 } // namespace kronos

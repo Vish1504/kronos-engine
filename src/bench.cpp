@@ -102,4 +102,81 @@ BenchmarkResult runWriteBenchmark(KronosEngine &engine,
   return result;
 }
 
+BenchmarkResult runReadBenchmark(KronosEngine &engine,
+                                 const BenchmarkConfig &config) {
+
+  if (config.operation_count == 0) {
+    throw std::invalid_argument(
+        "Benchmark operation_count must be greater than zero");
+  }
+
+  // Generate the same deterministic shuffled workload used
+  // to populate the database.
+  const auto workload =
+      generateWorkload(config.operation_count, config.value_size);
+
+  std::vector<std::chrono::nanoseconds> latencies;
+  latencies.reserve(config.operation_count);
+
+  const auto workload_start = std::chrono::steady_clock::now();
+
+  for (const auto &[key, expected_value] : workload) {
+
+    const auto operation_start = std::chrono::steady_clock::now();
+
+    const GetResult result = engine.get(key);
+
+    const auto operation_end = std::chrono::steady_clock::now();
+
+    latencies.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        operation_end - operation_start));
+
+    // Every generated key should exist in this benchmark.
+    if (result.status != GetStatus::FOUND) {
+      throw std::runtime_error("READ benchmark failed: key not found: " + key);
+    }
+
+    if (result.value != expected_value) {
+      throw std::runtime_error(
+          "READ benchmark failed: incorrect value for key: " + key);
+    }
+  }
+
+  const auto workload_end = std::chrono::steady_clock::now();
+
+  BenchmarkResult benchmark_result;
+
+  benchmark_result.elapsed_time =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(workload_end -
+                                                           workload_start);
+
+  const double elapsed_seconds =
+      std::chrono::duration<double>(benchmark_result.elapsed_time).count();
+
+  benchmark_result.throughput_ops_per_sec =
+      static_cast<double>(config.operation_count) / elapsed_seconds;
+
+  // Calculate latency statistics outside the measured workload.
+  std::sort(latencies.begin(), latencies.end());
+
+  int64_t total_latency_ns = 0;
+
+  for (const auto latency : latencies) {
+    total_latency_ns += latency.count();
+  }
+
+  benchmark_result.mean_latency = std::chrono::nanoseconds(
+      total_latency_ns / static_cast<int64_t>(latencies.size()));
+
+  benchmark_result.p50_latency = percentile(latencies, 0.50);
+
+  benchmark_result.p95_latency = percentile(latencies, 0.95);
+
+  benchmark_result.p99_latency = percentile(latencies, 0.99);
+
+  benchmark_result.max_latency = latencies.back();
+
+  return benchmark_result;
+}
+
 } // namespace kronos

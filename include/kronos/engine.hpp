@@ -5,11 +5,6 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <thread>
-
 #include <kronos/compaction_policy.hpp>
 #include <kronos/compactor.hpp>
 #include <kronos/config.hpp>
@@ -19,6 +14,11 @@
 #include <kronos/thread_safe_queue.hpp>
 #include <kronos/types.hpp>
 #include <kronos/wal.hpp>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
 namespace kronos {
 
 struct EngineMetrics {
@@ -162,6 +162,13 @@ private:
   std::atomic<size_t> flush_count_{0};
   std::atomic<size_t> compaction_count_{0};
   std::atomic<int64_t> total_compaction_time_ns_{0};
+
+  // Reader cache for easier reads
+  mutable std::mutex sstable_reader_mutex_;
+  std::unordered_map<std::string, std::shared_ptr<SstableReader>>
+      sstable_readers_;
+  std::shared_ptr<SstableReader>
+  getSstableReader(const std::filesystem::path &path);
 };
 
 } // namespace kronos

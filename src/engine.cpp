@@ -394,7 +394,8 @@ GetResult KronosEngine::get(const std::string &key) {
       continue;
     }
 
-    SstableReader reader(metadata.path);
+    // This will create a reader cache for easier future reads (future get())
+    auto reader = getSstableReader(metadata.path);
 
     /**
      * Several SSTables may contain different versions of this key.
@@ -403,7 +404,7 @@ GetResult KronosEngine::get(const std::string &key) {
      *
      *     highest sequence number wins.
      */
-    considerNewer(winner, reader.lookupEntry(key));
+    considerNewer(winner, reader->lookupEntry(key));
   }
 
   /**
@@ -1017,6 +1018,43 @@ EngineMetrics KronosEngine::getMetrics() const {
   }
 
   return metrics;
+}
+
+// adding a reader cache for easier reads from SStable
+
+/*
+  So the first GET against an SSTable does:
+    → xxx  cache MISS  xxx
+    → open SSTable
+    → read header/footer
+    → load Bloom
+    → load sparse index
+    → cache reader
+
+  Every subsequent GET does:
+    → cache hit
+    → reuse reader
+    → lookupEntry()
+
+*/
+std::shared_ptr<SstableReader>
+KronosEngine::getSstableReader(const std::filesystem::path &path) {
+
+  const std::string key = path.string();
+
+  std::lock_guard<std::mutex> lock(sstable_reader_mutex_);
+
+  auto it = sstable_readers_.find(key);
+
+  if (it != sstable_readers_.end()) {
+    return it->second;
+  }
+
+  auto reader = std::make_shared<SstableReader>(path);
+
+  sstable_readers_.emplace(key, reader);
+
+  return reader;
 }
 
 } // namespace kronos

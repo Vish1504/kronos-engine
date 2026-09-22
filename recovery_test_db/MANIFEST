@@ -1,0 +1,4 @@
+KRONOS_MANIFEST_V2
+CHECKPOINT 5
+0 "recovery_test_db/L0-1.sst" "persisted" "updated"
+0 "recovery_test_db/L0-2.sst" "deleted_after_checkpoint" "wal_only"

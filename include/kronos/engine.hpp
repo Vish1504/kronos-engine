@@ -1,55 +1,3 @@
-// #pragma once
-
-// #include <condition_variable>
-// #include <filesystem>
-// #include <memory>
-// #include <mutex>
-// #include <thread>
-
-// #include <kronos/compaction_policy.hpp>
-// #include <kronos/compactor.hpp>
-// #include <kronos/config.hpp>
-// #include <kronos/manifest.hpp>
-// #include <kronos/memtable.hpp>
-// #include <kronos/thread_safe_queue.hpp>
-// #include <kronos/wal.hpp>
-
-// namespace kronos {
-
-// class KronosEngine {
-// public:
-//   explicit KronosEngine(const Config &config,
-//                         const std::filesystem::path &db_path);
-
-//   ~KronosEngine();
-
-//   void shutdown();
-
-// private:
-//   std::filesystem::path db_path_;
-
-//   Wal wal_;
-//   CompactionPolicy compaction_policy_;
-//   Compactor compactor_;
-
-//   std::unique_ptr<Memtable> active_memtable_;
-//   std::shared_ptr<Memtable> immutable_memtable_;
-
-//   Manifest manifest_;
-
-//   thread_safe_queue<std::shared_ptr<Memtable>> flush_queue_;
-
-//   std::mutex state_mutex_;
-//   std::condition_variable immutable_cleared_cv_;
-//   bool shutting_down_ = false;
-
-//   std::thread background_worker_;
-
-//   void backgroundWorkerLoop();
-// };
-
-// } // namespace kronos
-
 #pragma once
 
 #include <condition_variable>
@@ -171,6 +119,7 @@ private:
 
   bool shutting_down_ = false;
 
+  void recover();
   // Declared after every state object it may access. The thread is started only
   // in the constructor body after all members above are fully constructed.
   std::thread background_worker_;
@@ -200,6 +149,8 @@ private:
 
   // Must be called while state_mutex_ is held.
   void rethrowBackgroundErrorLocked() const;
+  // to validate an sstable
+  void validateManifestSstables() const;
 };
 
 } // namespace kronos

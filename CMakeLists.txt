@@ -505,3 +505,51 @@ if(KRONOS_ENABLE_TSAN)
     )
 
 endif()
+
+# =========================================================
+# MODULE 9 RECOVERY TEST
+# =========================================================
+#
+# Simulates an ungraceful process exit after WAL-backed writes,
+# then reopens the same database directory and verifies that
+# Kronos reconstructs the lost active Memtable from the WAL.
+#
+# Like engine_test, this target compiles the required engine
+# sources directly because "kronos" is an executable, not a
+# reusable library target.
+# =========================================================
+
+add_executable(
+    recovery_test
+
+    tests/recovery_test.cpp
+
+    src/engine.cpp
+    src/config.cpp
+    src/wal.cpp
+    src/memtable.cpp
+    src/sstable.cpp
+    src/bloom_filter.cpp
+    src/manifest.cpp
+    src/compactor.cpp
+    src/compaction_policy.cpp
+    src/third_party/murmurhash3/MurmurHash3.cpp
+)
+
+target_include_directories(
+    recovery_test
+
+    PRIVATE
+
+    include
+    src
+)
+
+target_link_libraries(
+    recovery_test
+
+    PRIVATE
+
+    ZLIB::ZLIB
+    Threads::Threads
+)

@@ -3,7 +3,9 @@
 #include "kronos/types.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <vector>
 
 namespace kronos {
@@ -68,6 +70,13 @@ public:
    * Return the complete authoritative live SSTable set.
    */
   const std::vector<SstableMetadata> &liveFiles() const noexcept;
+  /*
+   * Return the highest sequence number whose logical effects are already
+   * represented by authoritative SSTable state.
+   *
+   * nullopt means no recovery checkpoint has been established yet.
+   */
+  std::optional<uint64_t> persistedThrough() const noexcept;
 
   /*
    * Return all authoritative SSTables belonging to one level.
@@ -116,7 +125,8 @@ private:
    * SSTable set.
    */
   std::vector<SstableMetadata> live_files_;
-
+  // Initialize with std::nullopt
+  std::optional<uint64_t> persisted_through_ = std::nullopt;
   /*
    * Return the temporary path used while constructing
    * the next MANIFEST snapshot.
@@ -138,7 +148,8 @@ private:
    * The snapshot is written to MANIFEST.tmp and then renamed
    * to MANIFEST.
    */
-  void persistSnapshot(const std::vector<SstableMetadata> &files) const;
+  void persistSnapshot(const std::vector<SstableMetadata> &files,
+                       const std::optional<uint64_t> &checkpoint) const;
 };
 
 } // namespace kronos

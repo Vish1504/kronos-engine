@@ -65,11 +65,15 @@ KronosEngine::KronosEngine(const Config &config,
       flush_queue_(), write_mutex_(), state_mutex_(), manifest_mutex_(),
       immutable_cleared_cv_(), background_error_(nullptr),
       shutting_down_(false), background_worker_() {
+  /*
+   * Reconstruct persistent database state before any background activity
+   * begins. If recovery fails, construction fails and no worker is started.
+   */
+  recover();
 
   /*
-   * The worker is started here (rather than in the initializer list) so every
-   * mutex, condition variable, queue and storage component it can touch is
-   * already fully constructed.
+   * Recovery has completed successfully. It is now safe for background
+   * maintenance to begin.
    */
   background_worker_ = std::thread(&KronosEngine::backgroundWorkerLoop, this);
 }
@@ -464,6 +468,7 @@ KronosEngine::metadataForSstable(const std::filesystem::path &path,
 }
 
 void KronosEngine::flushMemtable(const std::shared_ptr<Memtable> &memtable) {
+
   if (!memtable) {
     throw std::invalid_argument("Cannot flush a null Memtable");
   }
@@ -477,6 +482,7 @@ void KronosEngine::flushMemtable(const std::shared_ptr<Memtable> &memtable) {
   }
 
   const auto output_path = allocateSstablePath(0);
+
   SstableBuilder builder(output_path, sstable_block_size_, bloom_bits_per_key_);
 
   auto iterator = memtable->getIterator();
@@ -488,23 +494,59 @@ void KronosEngine::flushMemtable(const std::shared_ptr<Memtable> &memtable) {
   std::string smallest_key = iterator.key();
   std::string largest_key = smallest_key;
 
+  /*
+   * The recovery checkpoint for this flush is the highest sequence number
+   * represented by this immutable Memtable generation.
+   *
+   *
+   * Because foreground writes receive monotonically increasing sequence
+   * numbers and Memtable generations do not overlap, once this entire
+   * Memtable becomes authoritative in MANIFEST, the logical effects of all
+   * writes through this sequence are covered by SSTable state.
+   */
+  uint64_t flushed_through = iterator.entry().sequence;
+
   while (iterator.valid()) {
+
     largest_key = iterator.key();
+
+    flushed_through = std::max(flushed_through, iterator.entry().sequence);
+
     builder.add(iterator.key(), iterator.entry());
+
     iterator.next();
   }
 
-  // finish() finalizes the SSTable before MANIFEST is allowed to reference it.
+  /*
+   * Complete the SSTable before MANIFEST is allowed to reference it.
+   *
+   * If SSTable creation fails, MANIFEST remains unchanged and the Memtable
+   * is still the authoritative in-memory copy.
+   */
   builder.finish();
 
+  /*
+   * The SSTable addition and recovery checkpoint advance belong to the same
+   * MANIFEST transition.
+   *
+   * This prevents a crash from exposing a checkpoint that refers to data
+   * which has not yet become authoritative.
+   */
   ManifestEdit edit;
+
   edit.add_files.push_back(
       SstableMetadata{output_path, 0, smallest_key, largest_key});
 
+  edit.persisted_through_ = flushed_through;
+
   /*
-   * Logical truth first: the new L0 SSTable becomes part of the database only
-   * after MANIFEST commits the edit. Expensive SSTable construction happened
-   * before taking manifest_mutex_.
+   * Commit logical truth.
+   *
+   * After this succeeds:
+   *
+   *   - the new SSTable is authoritative;
+   *   - the MANIFEST checkpoint says that writes through flushed_through
+   *     no longer need to be reconstructed from the WAL.
    */
   {
     std::lock_guard<std::mutex> manifest_lock(manifest_mutex_);
@@ -512,9 +554,11 @@ void KronosEngine::flushMemtable(const std::shared_ptr<Memtable> &memtable) {
   }
 
   /*
-   * Only after the MANIFEST commit succeeds may the immutable slot be cleared.
-   * A foreground writer blocked by backpressure can now rotate its active
-   * Memtable safely.
+   * Only after the MANIFEST commit succeeds may this immutable Memtable
+   * stop being part of the live database state.
+   *
+   * Writers blocked by the single immutable-Memtable slot may proceed once
+   * the slot is cleared.
    */
   {
     std::lock_guard<std::mutex> state_lock(state_mutex_);
@@ -523,12 +567,35 @@ void KronosEngine::flushMemtable(const std::shared_ptr<Memtable> &memtable) {
       throw std::logic_error("Flushed Memtable is not the current immutable");
     }
 
+    /*
+     * The MANIFEST has already committed this Memtable's SSTable and
+     * checkpoint, so the immutable slot can now be released.
+     */
     immutable_memtable_.reset();
   }
 
+  /*
+   * Wake writers and shutdown() before attempting WAL reclamation.
+   *
+   * This ordering is critical:
+   *
+   * shutdown() may hold write_mutex_ while waiting for the immutable slot.
+   * If the worker tried to acquire write_mutex_ before clearing and notifying
+   * the immutable slot, the two threads would deadlock.
+   */
   immutable_cleared_cv_.notify_all();
-}
 
+  /*
+   * WAL reclamation must be serialized against foreground WAL appends.
+   *
+   * At this point the immutable slot is already clear, so a thread holding
+   * write_mutex_ is no longer waiting for this worker to make progress.
+   */
+  {
+    std::lock_guard<std::mutex> writer_lock(write_mutex_);
+    wal_.reclaimThrough(flushed_through);
+  }
+}
 void KronosEngine::maybeCompact() {
   /*
    * Flush priority: if a writer has already installed another immutable
@@ -589,6 +656,150 @@ void KronosEngine::maybeCompact() {
    */
 }
 
+void KronosEngine::validateManifestSstables() const {
+
+  const auto &live_files = manifest_.liveFiles();
+
+  for (const auto &metadata : live_files) {
+
+    if (!std::filesystem::exists(metadata.path)) {
+      throw std::runtime_error("MANIFEST references a missing SSTable: " +
+                               metadata.path.string());
+    }
+
+    /*
+     * Constructing SstableReader validates the SSTable's structural
+     * metadata: header/version, footer, Bloom-filter metadata and
+     * sparse-index metadata.
+     *
+     * Data-block CRCs remain validated when those blocks are actually read.
+     */
+    SstableReader reader(metadata.path);
+  }
+}
+
+void KronosEngine::recover() {
+
+  /*
+   * MANIFEST is authoritative. Before modifying/replaying the WAL,
+   * verify that every SSTable it declares live can actually be opened.
+   */
+  validateManifestSstables();
+  /*
+   * Read and validate every record that is still present in the WAL.
+   *
+   * wal_.recover() also repairs an incomplete final record and restores
+   * its own next-sequence position from the WAL records it discovers.
+   */
+  const auto records = wal_.recover();
+
+  /*
+   * The MANIFEST checkpoint tells us how far persistent SSTable state
+   * already covers the logical write history.
+   *
+   * Any WAL record at or below this boundary is historical redundancy
+   * and must not be replayed into the active Memtable.
+   */
+  const auto checkpoint = manifest_.persistedThrough();
+
+  std::optional<uint64_t> previous_sequence;
+
+  for (const auto &record : records) {
+
+    /*
+     * WAL records produced by Chronos must have strictly increasing
+     * sequence numbers.
+     *
+     * A regression or duplicate sequence indicates an invalid WAL history.
+     */
+    if (previous_sequence.has_value() &&
+        record.sequence <= *previous_sequence) {
+      throw std::runtime_error(
+          "WAL recovery found non-increasing sequence numbers");
+    }
+
+    previous_sequence = record.sequence;
+
+    /*
+     * There is no usable sequence number after UINT64_MAX.
+     * Refuse to open the database rather than allowing the allocator to wrap.
+     */
+    if (record.sequence == std::numeric_limits<uint64_t>::max()) {
+      throw std::overflow_error("WAL sequence space exhausted");
+    }
+
+    /*
+     * Records through the MANIFEST checkpoint are already represented by
+     * authoritative SSTable state.
+     *
+     * Only records newer than the checkpoint belonged to in-memory state
+     * that was lost when the previous process stopped.
+     */
+    if (checkpoint.has_value() && record.sequence <= *checkpoint) {
+      continue;
+    }
+
+    /*
+     * Replay the original operation directly into the active Memtable.
+     *
+     * We deliberately do NOT call KronosEngine::put()/remove() here because
+     * those functions would append a second WAL record and allocate a new
+     * sequence number.
+     *
+     * Recovery must restore the original sequence exactly.
+     */
+    if (record.operation == OperationType::PUT) {
+
+      const auto result =
+          active_memtable_->put(record.key, record.value, record.sequence);
+
+      if (result != Memtable::WriteResult::SUCCESS) {
+        throw std::logic_error("Active Memtable rejected recovered WAL PUT");
+      }
+
+    } else if (record.operation == OperationType::DELETE) {
+
+      const auto result = active_memtable_->remove(record.key, record.sequence);
+
+      if (result != Memtable::WriteResult::SUCCESS) {
+        throw std::logic_error("Active Memtable rejected recovered WAL DELETE");
+      }
+
+    } else {
+
+      /*
+       * Wal::recover() should already reject invalid operation bytes.
+       * Keep this defensive check so the engine never silently ignores an
+       * unknown recovered operation.
+       */
+      throw std::runtime_error("WAL recovery produced an invalid operation");
+    }
+  }
+
+  /*
+   * The WAL may contain no records newer than the checkpoint.
+   *
+   * Example:
+   *
+   *   MANIFEST checkpoint = 134
+   *   WAL                  = empty
+   *
+   * The next write must still receive sequence 135 rather than restarting
+   * from zero.
+   *
+   * ensureNextSequenceAtLeast() cannot move an already-higher WAL sequence
+   * backwards.
+   */
+  if (checkpoint.has_value()) {
+
+    if (*checkpoint == std::numeric_limits<uint64_t>::max()) {
+      throw std::overflow_error("WAL sequence space exhausted");
+    }
+
+    wal_.ensureNextSequenceAtLeast(*checkpoint + 1);
+  }
+}
+
 void KronosEngine::backgroundWorkerLoop() {
   while (true) {
     auto task = flush_queue_.wait_and_pop();
@@ -625,8 +836,8 @@ void KronosEngine::backgroundWorkerLoop() {
 
 void KronosEngine::shutdown() {
   /*
-   * Phase 1: publish engine shutdown and wake backpressured writers. New writes
-   * that enter after this point fail before touching the WAL.
+   * Phase 1:
+   * Publish shutdown exactly once.
    */
   {
     std::lock_guard<std::mutex> state_lock(state_mutex_);
@@ -638,71 +849,143 @@ void KronosEngine::shutdown() {
     shutting_down_ = true;
   }
 
+  /*
+   * Wake any foreground writer blocked on the immutable slot.
+   */
   immutable_cleared_cv_.notify_all();
 
   /*
-   * Phase 2: wait for any foreground write already in progress. A writer that
-   * was sleeping on immutable_cleared_cv_ wakes because shutting_down_ is now
-   * true, aborts before WAL append, and releases write_mutex_.
+   * Any exception that happens during graceful shutdown must NOT escape
+   * immediately.
+   *
+   * We first remember it, then always shut down the queue and join the worker.
+   *
+   * Otherwise:
+   *
+   *   shutdown throws
+   *       ↓
+   *   destructor calls shutdown again
+   *       ↓
+   *   shutting_down_ is already true
+   *       ↓
+   *   shutdown returns
+   *       ↓
+   *   std::thread is still joinable
+   *       ↓
+   *   std::terminate()
    */
-  std::unique_lock<std::mutex> writer_lock(write_mutex_);
+  std::exception_ptr shutdown_error = nullptr;
 
-  /*
-   * Before closing the queue, gracefully flush the final active Memtable. If an
-   * older immutable is still being flushed, wait for that single slot first.
-   */
-  {
-    std::unique_lock<std::mutex> state_lock(state_mutex_);
+  try {
+    /*
+     * Phase 2:
+     * Foreground-writer barrier.
+     *
+     * If a writer entered before shutting_down_ became true, wait until it
+     * releases write_mutex_.
+     *
+     * IMPORTANT:
+     * Do not keep write_mutex_ while waiting for background flushing because
+     * flushMemtable() also needs it for WAL reclamation.
+     */
+    { std::unique_lock<std::mutex> writer_barrier(write_mutex_); }
 
-    immutable_cleared_cv_.wait(state_lock, [this] {
-      return !immutable_memtable_ || background_error_;
-    });
+    /*
+     * Phase 3:
+     * Wait for any existing immutable Memtable to finish.
+     */
+    {
+      std::unique_lock<std::mutex> state_lock(state_mutex_);
 
-    if (!background_error_ && active_memtable_ &&
-        active_memtable_->entry_count() > 0) {
+      immutable_cleared_cv_.wait(state_lock, [this] {
+        return !immutable_memtable_ || background_error_;
+      });
 
-      if (!active_memtable_->freeze()) {
-        throw std::logic_error("Final active Memtable could not be frozen");
-      }
+      /*
+       * If background maintenance already failed, do not schedule any more
+       * work. We will surface that failure after joining the worker.
+       */
+      if (!background_error_ && active_memtable_ &&
+          active_memtable_->entry_count() > 0) {
 
-      auto final_memtable =
-          std::shared_ptr<Memtable>(std::move(active_memtable_));
-      immutable_memtable_ = final_memtable;
+        /*
+         * Persist the final active Memtable before graceful shutdown
+         * completes.
+         */
+        if (!active_memtable_->freeze()) {
+          throw std::logic_error("Final active Memtable could not be frozen");
+        }
 
-      if (!flush_queue_.push(std::move(final_memtable))) {
-        background_error_ = std::make_exception_ptr(std::runtime_error(
-            "Flush queue closed before final Memtable could be scheduled"));
+        auto final_memtable =
+            std::shared_ptr<Memtable>(std::move(active_memtable_));
+
+        immutable_memtable_ = final_memtable;
+
+        /*
+         * The queue must still accept this final flush.
+         */
+        if (!flush_queue_.push(std::move(final_memtable))) {
+          throw std::runtime_error("Flush queue closed before final Memtable "
+                                   "could be scheduled");
+        }
       }
     }
+
+  } catch (...) {
+    /*
+     * Do NOT rethrow yet.
+     *
+     * We still own a potentially joinable background thread.
+     */
+    shutdown_error = std::current_exception();
   }
 
-  writer_lock.unlock();
-
   /*
-   * Phase 3: close the queue to new work. Its graceful-drain contract
-   * guarantees the final Memtable accepted above is processed before
-   * wait_and_pop() returns nullopt to the worker.
+   * Phase 4:
+   * Always close the queue.
+   *
+   * Already accepted work is allowed to drain.
    */
   flush_queue_.shutdown();
 
   /*
-   * join() does not stop the worker; it waits until backgroundWorkerLoop()
-   * actually returns. Never hold state_mutex_ or manifest_mutex_ while joining,
-   * because the worker may need those mutexes in order to finish.
+   * Phase 5:
+   * Always join the worker before allowing shutdown() to return or throw.
    */
-  if (background_worker_.joinable()) {
-    background_worker_.join();
+  try {
+    if (background_worker_.joinable()) {
+      background_worker_.join();
+    }
+
+  } catch (...) {
+    /*
+     * Preserve an earlier shutdown failure if one already exists.
+     */
+    if (!shutdown_error) {
+      shutdown_error = std::current_exception();
+    }
   }
 
-  // Explicit shutdown surfaces a background maintenance failure after cleanup.
-  std::exception_ptr error;
+  /*
+   * Capture any failure reported by the background worker.
+   */
+  std::exception_ptr background_error;
+
   {
     std::lock_guard<std::mutex> state_lock(state_mutex_);
-    error = background_error_;
+    background_error = background_error_;
   }
 
-  if (error) {
-    std::rethrow_exception(error);
+  /*
+   * Only NOW is it safe for shutdown() to throw because the worker is no
+   * longer joinable.
+   */
+  if (shutdown_error) {
+    std::rethrow_exception(shutdown_error);
+  }
+
+  if (background_error) {
+    std::rethrow_exception(background_error);
   }
 }
 

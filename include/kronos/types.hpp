@@ -57,6 +57,7 @@ struct CompactionResult {
 struct ManifestEdit {
   std::vector<std::filesystem::path> remove_files;
   std::vector<SstableMetadata> add_files;
+  std::optional<uint64_t> persisted_through_;
 };
 
 // A compaction decision made by the CompactionPolicy.

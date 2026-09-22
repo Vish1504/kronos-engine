@@ -1,127 +1,230 @@
 #include <kronos/wal.hpp>
 
-#include <iostream>
-// #include <fstream>
-#include <cerrno> //for EINTR
+#include <cerrno>
 #include <cstring>
-#include <fcntl.h> // open(), O_RDWR, O_CREAT
+#include <fcntl.h>
 #include <filesystem>
 #include <limits>
+#include <optional>
 #include <stdexcept>
-#include <unistd.h> // read(), write(), lseek(), fsync(), ftruncate(), close()
+#include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <utility>
 #include <vector>
-#include <zlib.h> // crc32()
+#include <zlib.h>
 
 namespace fs = std::filesystem;
 
 /*
-  WAL (Write-Ahead Log) notes
-  ---------------------
-  The WAL provides durability for Kronos writes.
-  A written record must first be recorded durably in the WAL [D], and then later
-  added to Memtable [R]. If Kronos crashes and the Memtable is lost, the WAL
-  can later be replayed to reconstruct the lost in-memory state.
-
-  WAL file layout:
-
-    FILE HEADER:
-    [Magic][Version] (Validation for magic bytes has been
-  implemented as well)
-
-    RECORD:
-    [Sequence][Operation][Key Length][Value Length][Key][Value][CRC32]
-
-  Current field sizes:
-    Sequence     -> uint64_t (8 bytes)
-    Operation    -> uint8_t  (1 byte)
-    Key Length   -> uint32_t (4 bytes)
-    Value Length -> uint32_t (4 bytes)
-    Key          -> string variable
-    Value        -> string variable
-    CRC32        -> uint32_t (4 bytes)
-
-  V1 currently serializes integers using the host machine's native byte order.
-  A fixed byte order can be introduced later for cross-platform portability.
-
-  The first WAL implementation used std::fstream.
-  So I later moved to POSIX I/O because Kronos needed fsync() for an explicit
-  durability boundary.
-
+ * WAL (Write-Ahead Log)
+ * ---------------------
+ *
+ * A write is persisted to the WAL before it is applied to the Memtable.
+ * If the process crashes and the in-memory Memtable disappears, the WAL
+ * can be replayed during startup to reconstruct the lost state.
+ *
+ * File layout:
+ *
+ *   HEADER:
+ *   [Magic][Version]
+ *
+ *   RECORD:
+ *   [Sequence][Operation][Key Length][Value Length][Key][Value][CRC32]
+ *
+ * Field sizes:
+ *
+ *   Sequence     -> uint64_t
+ *   Operation    -> uint8_t
+ *   Key Length   -> uint32_t
+ *   Value Length -> uint32_t
+ *   Key          -> variable bytes
+ *   Value        -> variable bytes
+ *   CRC32        -> uint32_t
+ *
+ * Chronos v1 serializes integer fields using the host machine's native
+ * byte order. A fixed byte order can be introduced later if cross-platform
+ * WAL portability becomes a requirement.
  */
 
-kronos::Wal::Wal(const std::filesystem::path &pathWal) {
-  bool isNewFile = !fs::exists(pathWal); // Check existence first
-  /* Here we open the WAL for both reading (needed for validation/recovery) and
-  writing (needed for appending new records).*/
-  //   file_.open(pathWal, std::ios::binary | std::ios::out | std::ios::in);
+template <typename T>
+void appendBytes(std::vector<uint8_t> &record, const T &value) {
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&value);
 
-  fd_ = ::open(pathWal.c_str(), O_RDWR | O_CREAT, 0644);
+  record.insert(record.end(), bytes, bytes + sizeof(value));
+}
 
-  if ((fd_) == -1) {
-    throw std::runtime_error("Failed to open WAL file");
+/// making this helper private to wal.cpp
+namespace {
+void fsyncParentDirectory(const std::filesystem::path &path) {
+  std::filesystem::path parent = path.parent_path();
+
+  if (parent.empty()) {
+    parent = ".";
   }
 
-  if (isNewFile) {
-    if (::write(fd_, magic_, sizeof(magic_)) != sizeof(magic_)) {
-      throw std::runtime_error("Failed to write WAL magic");
-    }
+  int fd = ::open(parent.c_str(), O_RDONLY);
 
-    if (::write(fd_, &version_, sizeof(version_)) != sizeof(version_)) {
-      throw std::runtime_error("Failed to write WAL version");
-    }
+  if (fd == -1) {
+    throw std::runtime_error("Failed to open WAL parent directory for fsync");
   }
 
-  // if this is an already existing file
-  if (!isNewFile) {
-    // magic bytes verification
-    char magicRead[4];
-    if (::lseek(fd_, 0, SEEK_SET) == -1) {
-      throw std::runtime_error("Failed to seek WAL");
+  while (::fsync(fd) == -1) {
+    if (errno == EINTR) {
+      continue;
     }
 
-    /*
-        We must read all four magic bytes before comparing them.
-        A shorter read means the WAL header is incomplete or invalid.
-        */
-
-    // if (!file_) {
-    //   throw std::runtime_error("Failed to read WAL magic");
-    // }
-    ssize_t bytesRead = ::read(fd_, magicRead, sizeof(magicRead));
-
-    if (bytesRead != sizeof(magicRead)) {
-      throw std::runtime_error("Failed to read WAL magic");
+    if (errno == EINVAL || errno == ENOTSUP || errno == EOPNOTSUPP) {
+      ::close(fd);
+      return;
     }
 
-    // checking if magic_ & magicRead are the same
-    //  Verify that the file contains the expected WAL magic.
-    if (std::memcmp(magicRead, magic_, sizeof(magic_)) != 0) {
-      throw std::runtime_error("Invalid WAL magic");
-    }
+    ::close(fd);
+
+    throw std::runtime_error("Failed to fsync WAL parent directory");
   }
 
-  // Manually move the write pointer to the end of the existing file
-  //   file_.seekp(0, std::ios::end);
-  if (::lseek(fd_, 0, SEEK_END) == -1) {
-    throw std::runtime_error("Failed to seek to end of WAL");
+  ::close(fd);
+}
+
+} // namespace
+
+void kronos::Wal::ensureNextSequenceAtLeast(uint64_t minimum_next_sequence) {
+
+  if (next_sequence_ < minimum_next_sequence) {
+    next_sequence_ = minimum_next_sequence;
   }
 }
 
-/* This is a function template because the same operation is needed for
- * different field types (uint64_t sequence, uint32_t lengths, Operation, etc.).
- */
-template <typename T>
-void appendBytes(std::vector<uint8_t> &record, const T &value) {
+kronos::Wal::Wal(const std::filesystem::path &pathWal) : path_(pathWal) {
+  const bool isNewFile = !fs::exists(pathWal);
 
-  /* we need to view "value" as individual bytes and append all its bytes to the
-   serialized WAL record */
-  const uint8_t *valueInBytes = reinterpret_cast<const uint8_t *>(&value);
+  /*
+   * O_RDWR is required because the WAL is both replayed and appended to.
+   *
+   * O_CREAT creates the WAL if the database does not have one yet.
+   */
+  fd_ = ::open(pathWal.c_str(), O_RDWR | O_CREAT, 0644);
 
-  record.insert(record.end(),                // WHERE should I insert?
-                valueInBytes,                // WHAT is the beginning?
-                valueInBytes + sizeof(value) // WHERE is the end?
-  );
+  if (fd_ == -1) {
+    throw std::runtime_error("Failed to open WAL file");
+  }
+
+  try {
+    if (isNewFile) {
+      size_t totalWritten = 0;
+
+      // Write WAL magic.
+      while (totalWritten < sizeof(magic_)) {
+        ssize_t result = ::write(
+            fd_, reinterpret_cast<const uint8_t *>(magic_) + totalWritten,
+            sizeof(magic_) - totalWritten);
+
+        if (result == -1) {
+          if (errno == EINTR) {
+            continue;
+          }
+
+          throw std::runtime_error("Failed to write WAL magic");
+        }
+
+        if (result == 0) {
+          throw std::runtime_error("Failed to write WAL magic");
+        }
+
+        totalWritten += static_cast<size_t>(result);
+      }
+
+      // Write WAL format version.
+      totalWritten = 0;
+
+      while (totalWritten < sizeof(version_)) {
+        ssize_t result = ::write(
+            fd_, reinterpret_cast<const uint8_t *>(&version_) + totalWritten,
+            sizeof(version_) - totalWritten);
+
+        if (result == -1) {
+          if (errno == EINTR) {
+            continue;
+          }
+
+          throw std::runtime_error("Failed to write WAL version");
+        }
+
+        if (result == 0) {
+          throw std::runtime_error("Failed to write WAL version");
+        }
+
+        totalWritten += static_cast<size_t>(result);
+      }
+
+      /*
+       * The complete WAL header [Magic][Version] must be durable before
+       * the database begins accepting writes.
+       */
+      while (::fsync(fd_) == -1) {
+        if (errno == EINTR) {
+          continue;
+        }
+
+        throw std::runtime_error("Failed to fsync new WAL");
+      }
+
+      /*
+       * Persist creation of the WAL directory entry.
+       */
+      fsyncParentDirectory(path_);
+
+    } else {
+
+      /*
+       * Validate the existing WAL header before attempting recovery.
+       */
+      if (::lseek(fd_, 0, SEEK_SET) == -1) {
+        throw std::runtime_error("Failed to seek WAL");
+      }
+
+      char magicRead[sizeof(magic_)];
+
+      if (readUpTo(magicRead, sizeof(magicRead)) != sizeof(magicRead)) {
+        throw std::runtime_error("Failed to read WAL magic");
+      }
+
+      if (std::memcmp(magicRead, magic_, sizeof(magic_)) != 0) {
+        throw std::runtime_error("Invalid WAL magic");
+      }
+
+      uint8_t versionRead = 0;
+
+      if (readUpTo(&versionRead, sizeof(versionRead)) != sizeof(versionRead)) {
+        throw std::runtime_error("Failed to read WAL version");
+      }
+
+      if (versionRead != version_) {
+        throw std::runtime_error("Unsupported WAL version");
+      }
+    }
+
+    /*
+     * New writes must always append after the existing WAL contents.
+     */
+    if (::lseek(fd_, 0, SEEK_END) == -1) {
+      throw std::runtime_error("Failed to seek to end of WAL");
+    }
+
+  } catch (...) {
+
+    ::close(fd_);
+    fd_ = -1;
+
+    throw;
+  }
+}
+
+kronos::Wal::~Wal() {
+  if (fd_ != -1) {
+    ::close(fd_);
+  }
 }
 
 uint64_t kronos::Wal::put(const std::string &key, const std::string &value) {
@@ -132,133 +235,143 @@ uint64_t kronos::Wal::remove(const std::string &key) {
   return writeRecord(OperationType::DELETE, key, "");
 }
 
-uint64_t kronos::Wal::writeRecord(OperationType operation, const std::string &key,
+uint64_t kronos::Wal::writeRecord(OperationType operation,
+                                  const std::string &key,
                                   const std::string &value) {
 
-  // Here we build the serialized representation of: [Sequence][PUT][Key
-  // Length][Value Length][Key][Value]
+  /*
+   * UINT64_MAX cannot have a successor.
+   *
+   * Reject the write before touching the WAL rather than allowing
+   * next_sequence_ to wrap back to zero.
+   */
+  if (next_sequence_ == std::numeric_limits<uint64_t>::max()) {
+    throw std::overflow_error("WAL sequence space exhausted");
+  }
 
-  uint64_t sequence = next_sequence_;
+  const uint64_t sequence = next_sequence_;
 
-  // .size() returns type size_t, which is 64-bit on a 64 bit machine
-  /* Our WAL format stores lengths as uint32_t (4 bytes), so verify the sizes
-    fit before converting them to uint32_t. */
+  /*
+   * WAL lengths are encoded as uint32_t, so the strings must fit before
+   * converting size_t to uint32_t.
+   */
   if (key.size() > std::numeric_limits<uint32_t>::max() ||
       value.size() > std::numeric_limits<uint32_t>::max()) {
+
     throw std::runtime_error("Key or value too large for WAL record");
   }
 
-  // We explicitly convert size_t -> uint32_t
-  uint32_t keyLength = static_cast<uint32_t>(key.size());
-  uint32_t valueLength = static_cast<uint32_t>(value.size());
+  const uint32_t keyLength = static_cast<uint32_t>(key.size());
 
-  /* We’re assembling the serialized WAL record using a temporary RAM buffer bu
-   * so that we can run CRC32 over those exact bytes. */
+  const uint32_t valueLength = static_cast<uint32_t>(value.size());
+
+  /*
+   * The disk format defines Operation as exactly one byte.
+   *
+   * Serialize an explicit uint8_t rather than relying on sizeof(OperationType).
+   */
+  const uint8_t operationByte = static_cast<uint8_t>(operation);
+
+  /*
+   * Build:
+   *
+   * [Sequence]
+   * [Operation]
+   * [Key Length]
+   * [Value Length]
+   * [Key]
+   * [Value]
+   *
+   * CRC32 is calculated over these exact bytes and appended afterward.
+   */
   std::vector<uint8_t> record;
 
   appendBytes(record, sequence);
-  appendBytes(record, operation);
+  appendBytes(record, operationByte);
   appendBytes(record, keyLength);
   appendBytes(record, valueLength);
+
   for (char c : key) {
     record.push_back(static_cast<uint8_t>(c));
   }
+
   for (char c : value) {
     record.push_back(static_cast<uint8_t>(c));
   }
 
-  // Now we calculate CRC32 over these exact serialized bytes.
-  // Initialize the CRC register
   uLong crc = crc32(0L, Z_NULL, 0);
 
-  // Compute the checksum over the current contents of record [R].
   crc =
       crc32(crc, reinterpret_cast<const Bytef *>(record.data()), record.size());
 
-  // Converting checksum to uint32_t as zlib returns the checksum as uLong.
-  uint32_t checksum_value = static_cast<uint32_t>(crc);
+  const uint32_t checksum = static_cast<uint32_t>(crc);
 
-  /* Final layout:
-  [Sequence][Operation][Key Length][Value Length][Key][Value][CRC32]
-     */
-
-  // Append the 4 checksum bytes to the serialized record [R]
-  appendBytes(record, checksum_value);
+  /*
+   * Final record:
+   *
+   * [Sequence][Operation][Key Length][Value Length]
+   * [Key][Value][CRC32]
+   */
+  appendBytes(record, checksum);
 
   size_t totalWritten = 0;
 
   while (totalWritten < record.size()) {
+
     ssize_t bytesWritten = ::write(fd_, record.data() + totalWritten,
                                    record.size() - totalWritten);
 
     if (bytesWritten == -1) {
-      if (errno == EINTR) { // If interrupted by OS signal
-        continue; // If interrupted by OS signal, retry the remaining bytes
+
+      if (errno == EINTR) {
+        continue;
       }
 
       throw std::runtime_error("Failed to write WAL record");
     }
 
+    if (bytesWritten == 0) {
+      throw std::runtime_error("Failed to make progress writing WAL record");
+    }
+
     totalWritten += static_cast<size_t>(bytesWritten);
   }
 
+  /*
+   * A write is not acknowledged until the WAL record has crossed the
+   * file-level durability boundary.
+   */
   while (::fsync(fd_) == -1) {
+
     if (errno == EINTR) {
       continue;
     }
+
     throw std::runtime_error("Failed to fsync WAL");
   }
 
-  next_sequence_++;
+  next_sequence_ = sequence + 1;
+
   return sequence;
 }
 
-kronos::Wal::~Wal() {
-  if (fd_ != -1) {
-    ::close(fd_);
-  }
-}
-
-// //corrupted record
-// /*  - keep all previously recovered records
-//     - truncate WAL [D] back to the start of this incomplete record
-//     - finish recovery successfully*/
-
-// }
-
 /*
-  Recovery notes
-  --------------
-  Now imagine Kronos crashes. Everything in the Memtable[R] will eventually
-  disappear because it's in the RAM. When Kronos starts again, all it has is
-  this file: WAL[D]
-
-   Recovery policy:
-  1. Clean EOF between records:
-     Recovery succeeds.
-
-  2. EOF in the middle of the final record:
-     Keep previously valid records,
-     truncate the incomplete tail,
-     fsync the repair,
-     and finish recovery successfully.
-
-  3. CRC mismatch / invalid operation:
-     Treat it as genuine corruption,
-     do NOT truncate automatically,
-     and fail recovery.
-*/
-
-// This function exists because a read function does not guaranntee you get all
-// the bytes in one call
+ * read() may legally return fewer bytes than requested.
+ *
+ * Keep reading until:
+ *
+ *   - the requested byte count has been obtained,
+ *   - EOF is reached,
+ *   - or a genuine read error occurs.
+ */
 size_t kronos::Wal::readUpTo(void *buffer, size_t bytesToRead) {
+
   size_t totalRead = 0;
 
-  // We will consider the destination buffer as raw bytes so we can advance
-  // through it byte by byte.
   uint8_t *bytes = static_cast<uint8_t *>(buffer);
 
   while (totalRead < bytesToRead) {
+
     ssize_t result = ::read(fd_, bytes + totalRead, bytesToRead - totalRead);
 
     if (result > 0) {
@@ -267,12 +380,10 @@ size_t kronos::Wal::readUpTo(void *buffer, size_t bytesToRead) {
     }
 
     if (result == 0) {
-      // EOF
       break;
     }
 
-    if (errno == EINTR) // If interrupted by OS signal
-    {
+    if (errno == EINTR) {
       continue;
     }
 
@@ -282,32 +393,84 @@ size_t kronos::Wal::readUpTo(void *buffer, size_t bytesToRead) {
   return totalRead;
 }
 
+/*
+ * WAL recovery policy
+ * -------------------
+ *
+ * 1. Clean EOF between records:
+ *      recovery succeeds.
+ *
+ * 2. EOF while reading the final record:
+ *      keep all earlier valid records,
+ *      truncate the incomplete tail,
+ *      fsync the repair,
+ *      and finish recovery successfully.
+ *
+ * 3. CRC mismatch or invalid operation:
+ *      treat it as genuine corruption,
+ *      do not silently truncate it,
+ *      and fail recovery.
+ */
 std::vector<kronos::Wal::RecoveredRecord> kronos::Wal::recover() {
-
-  /*                           WAL [D]
-                                  ↓
-                              read bytes
-                                  ↓
-                              deserialize
-                                  ↓
-                              recover operation
-
-  */
-
   std::vector<RecoveredRecord> records;
-  // Records begin immediately after [Magic][Version].
+  std::optional<uint64_t> previous_sequence;
+
+  /*
+   * Snapshot the physical WAL size.
+   *
+   * Recovery runs while no concurrent writer is modifying the WAL, so this
+   * remains stable for the duration of this recovery pass.
+   *
+   * We use it later to validate key/value lengths BEFORE allocating memory.
+   */
+  struct stat wal_stat {};
+
+  if (::fstat(fd_, &wal_stat) == -1) {
+    throw std::runtime_error("Failed to determine WAL size during recovery");
+  }
+
+  if (wal_stat.st_size < 0) {
+    throw std::runtime_error("Invalid WAL size");
+  }
+
+  const uint64_t wal_file_size = static_cast<uint64_t>(wal_stat.st_size);
+
+  /*
+   * Helper for a legitimately incomplete final WAL record.
+   *
+   * Preserve every earlier validated record and remove only the unfinished
+   * tail.
+   */
+  auto truncateIncompleteTail = [&](off_t record_start) {
+    if (::ftruncate(fd_, record_start) == -1) {
+      throw std::runtime_error("Failed to truncate incomplete WAL record");
+    }
+
+    while (::fsync(fd_) == -1) {
+      if (errno == EINTR) {
+        continue;
+      }
+
+      throw std::runtime_error("Failed to fsync WAL after truncation");
+    }
+  };
+
+  /*
+   * WAL records begin immediately after:
+   *
+   * [Magic][Version]
+   */
   if (::lseek(fd_, sizeof(magic_) + sizeof(version_), SEEK_SET) == -1) {
+
     throw std::runtime_error("Failed to seek WAL for recovery");
   }
 
-  while (true) { // Keep trying to recover records until we intentionally break.
+  while (true) {
     /*
-      Remember where this record begins.
-
-      If EOF occurs after the record has started but before it finishes,
-      recovery can safely truncate the incomplete final tail back to here.
-    */
-    off_t recordStart = ::lseek(fd_, 0, SEEK_CUR);
+     * If this record turns out to be an interrupted final write, this is the
+     * exact position to which the WAL must be truncated.
+     */
+    const off_t recordStart = ::lseek(fd_, 0, SEEK_CUR);
 
     if (recordStart == -1) {
       throw std::runtime_error("Failed to determine WAL record position");
@@ -317,36 +480,36 @@ std::vector<kronos::Wal::RecoveredRecord> kronos::Wal::recover() {
     // 1. SEQUENCE
     // ---------------------------------------------------------
 
-    uint64_t sequence;
+    uint64_t sequence = 0;
 
-    size_t sequenceBytes = readUpTo(&sequence, sizeof(sequence));
+    const size_t sequenceBytes = readUpTo(&sequence, sizeof(sequence));
 
     if (sequenceBytes == 0) {
-      // Clean EOF.
-      // No new record even started.
+      // Clean EOF between records.
       break;
     }
 
-    if (sequenceBytes < sizeof(sequence)) {
-      // A record started but was cut off - We will remove this incomplete final
-      // tail.
-      if (::ftruncate(fd_, recordStart) == -1) {
-        throw std::runtime_error("Failed to truncate incomplete WAL record");
-      }
-      while (::fsync(fd_) == -1) {
-        if (errno == EINTR) {
-          continue;
-        }
-        throw std::runtime_error("Failed to fsync WAL after truncation");
-      }
-
+    if (sequenceBytes != sizeof(sequence)) {
+      truncateIncompleteTail(recordStart);
       break;
     }
 
     /*
-          Reconstruct the exact serialized record bytes so that CRC32 can be
-          recalculated and compared with the stored checksum.
-        */
+     * Reconstruct exactly the serialized bytes protected by CRC32.
+     *
+     * IMPORTANT:
+     *
+     * The writer calculates CRC over:
+     *
+     * [sequence]
+     * [operation]
+     * [keyLength]
+     * [valueLength]
+     * [key]
+     * [value]
+     *
+     * Recovery must rebuild EXACTLY those bytes in EXACTLY that order.
+     */
     std::vector<uint8_t> recordBytes;
 
     appendBytes(recordBytes, sequence);
@@ -355,37 +518,30 @@ std::vector<kronos::Wal::RecoveredRecord> kronos::Wal::recover() {
     // 2. OPERATION
     // ---------------------------------------------------------
 
-    uint8_t operationByte;
+    uint8_t operationByte = 0;
 
     if (readUpTo(&operationByte, sizeof(operationByte)) !=
         sizeof(operationByte)) {
 
-      if (::ftruncate(fd_, recordStart) == -1) {
-        throw std::runtime_error("Failed to truncate incomplete WAL record");
-      }
-      while (::fsync(fd_) == -1) {
-        if (errno == EINTR) {
-          continue;
-        }
-        throw std::runtime_error("Failed to fsync WAL after truncation");
-      }
-
+      truncateIncompleteTail(recordStart);
       break;
     }
 
     OperationType operation;
 
     if (operationByte == static_cast<uint8_t>(OperationType::PUT)) {
+
       operation = OperationType::PUT;
+
     } else if (operationByte == static_cast<uint8_t>(OperationType::DELETE)) {
+
       operation = OperationType::DELETE;
+
     } else {
-      // This is not an incomplete write.
-      // The WAL contains an invalid OperationType value.
       /*
-        The byte exists, but it does not represent a valid OperationType.
-        This is treated as corruption rather than an incomplete tail.
-      */
+       * The byte physically exists but is not a legal Chronos operation.
+       * This is corruption rather than an incomplete tail.
+       */
       throw std::runtime_error("WAL corruption detected: invalid operation");
     }
 
@@ -395,20 +551,11 @@ std::vector<kronos::Wal::RecoveredRecord> kronos::Wal::recover() {
     // 3. KEY LENGTH
     // ---------------------------------------------------------
 
-    uint32_t keyLength;
+    uint32_t keyLength = 0;
 
     if (readUpTo(&keyLength, sizeof(keyLength)) != sizeof(keyLength)) {
 
-      if (::ftruncate(fd_, recordStart) == -1) {
-        throw std::runtime_error("Failed to truncate incomplete WAL record");
-      }
-      while (::fsync(fd_) == -1) {
-        if (errno == EINTR) {
-          continue;
-        }
-        throw std::runtime_error("Failed to fsync WAL after truncation");
-      }
-
+      truncateIncompleteTail(recordStart);
       break;
     }
 
@@ -418,46 +565,77 @@ std::vector<kronos::Wal::RecoveredRecord> kronos::Wal::recover() {
     // 4. VALUE LENGTH
     // ---------------------------------------------------------
 
-    uint32_t valueLength;
+    uint32_t valueLength = 0;
 
     if (readUpTo(&valueLength, sizeof(valueLength)) != sizeof(valueLength)) {
 
-      if (::ftruncate(fd_, recordStart) == -1) {
-        throw std::runtime_error("Failed to truncate incomplete WAL record");
-      }
-      while (::fsync(fd_) == -1) {
-        if (errno == EINTR) {
-          continue;
-        }
-        throw std::runtime_error("Failed to fsync WAL after truncation");
-      }
-
+      truncateIncompleteTail(recordStart);
       break;
     }
 
     appendBytes(recordBytes, valueLength);
 
     // ---------------------------------------------------------
-    // 5. KEY
+    // 5. VALIDATE LENGTHS BEFORE ALLOCATION
     // ---------------------------------------------------------
 
-    // we're creating a key strig of keyLength length filled with null
-    // characters.
+    /*
+     * The cursor is now immediately after:
+     *
+     * [sequence]
+     * [operation]
+     * [keyLength]
+     * [valueLength]
+     *
+     * From here the record must still contain:
+     *
+     * [key]
+     * [value]
+     * [CRC32]
+     */
+    const off_t payloadStart = ::lseek(fd_, 0, SEEK_CUR);
+
+    if (payloadStart == -1) {
+      throw std::runtime_error("Failed to determine WAL payload position");
+    }
+
+    const uint64_t payloadPosition = static_cast<uint64_t>(payloadStart);
+
+    if (payloadPosition > wal_file_size) {
+      throw std::runtime_error("WAL recovery position exceeds file size");
+    }
+
+    const uint64_t bytesRemaining = wal_file_size - payloadPosition;
+
+    /*
+     * Promote both lengths before addition so the calculation itself cannot
+     * overflow uint32_t.
+     */
+    const uint64_t requiredBytes = static_cast<uint64_t>(keyLength) +
+                                   static_cast<uint64_t>(valueLength) +
+                                   static_cast<uint64_t>(sizeof(uint32_t));
+
+    if (requiredBytes > bytesRemaining) {
+      /*
+       * The final record header exists but its declared payload/CRC does not
+       * physically fit in the file.
+       *
+       * This is consistent with a crash during the final WAL append.
+       */
+      truncateIncompleteTail(recordStart);
+      break;
+    }
+
+    // ---------------------------------------------------------
+    // 6. KEY
+    // ---------------------------------------------------------
+
     std::string key(keyLength, '\0');
 
     if (keyLength > 0) {
       if (readUpTo(key.data(), keyLength) != keyLength) {
 
-        if (::ftruncate(fd_, recordStart) == -1) {
-          throw std::runtime_error("Failed to truncate incomplete WAL record");
-        }
-        while (::fsync(fd_) == -1) {
-          if (errno == EINTR) {
-            continue;
-          }
-          throw std::runtime_error("Failed to fsync WAL after truncation");
-        }
-
+        truncateIncompleteTail(recordStart);
         break;
       }
 
@@ -467,7 +645,7 @@ std::vector<kronos::Wal::RecoveredRecord> kronos::Wal::recover() {
     }
 
     // ---------------------------------------------------------
-    // 6. VALUE
+    // 7. VALUE
     // ---------------------------------------------------------
 
     std::string value(valueLength, '\0');
@@ -475,17 +653,7 @@ std::vector<kronos::Wal::RecoveredRecord> kronos::Wal::recover() {
     if (valueLength > 0) {
       if (readUpTo(value.data(), valueLength) != valueLength) {
 
-        if (::ftruncate(fd_, recordStart) == -1) {
-          throw std::runtime_error("Failed to truncate incomplete WAL record");
-        }
-
-        while (::fsync(fd_) == -1) {
-          if (errno == EINTR) {
-            continue;
-          }
-          throw std::runtime_error("Failed to fsync WAL after truncation");
-        }
-
+        truncateIncompleteTail(recordStart);
         break;
       }
 
@@ -495,30 +663,20 @@ std::vector<kronos::Wal::RecoveredRecord> kronos::Wal::recover() {
     }
 
     // ---------------------------------------------------------
-    // 7. STORED CRC32
+    // 8. STORED CRC32
     // ---------------------------------------------------------
 
-    uint32_t storedChecksum;
+    uint32_t storedChecksum = 0;
 
     if (readUpTo(&storedChecksum, sizeof(storedChecksum)) !=
         sizeof(storedChecksum)) {
 
-      if (::ftruncate(fd_, recordStart) == -1) {
-        throw std::runtime_error("Failed to truncate incomplete WAL record");
-      }
-
-      while (::fsync(fd_) == -1) {
-        if (errno == EINTR) {
-          continue;
-        }
-        throw std::runtime_error("Failed to fsync WAL after truncation");
-      }
-
+      truncateIncompleteTail(recordStart);
       break;
     }
 
     // ---------------------------------------------------------
-    // 8. RECOMPUTE CRC32
+    // 9. VERIFY CRC32
     // ---------------------------------------------------------
 
     uLong crc = crc32(0L, Z_NULL, 0);
@@ -526,34 +684,270 @@ std::vector<kronos::Wal::RecoveredRecord> kronos::Wal::recover() {
     crc = crc32(crc, reinterpret_cast<const Bytef *>(recordBytes.data()),
                 recordBytes.size());
 
-    uint32_t calculatedChecksum = static_cast<uint32_t>(crc);
+    const uint32_t calculatedChecksum = static_cast<uint32_t>(crc);
 
     if (calculatedChecksum != storedChecksum) {
-      // Genuine corruption.
-      //
-      // IMPORTANT:
-      // Do NOT truncate automatically.
-      // Normal recovery fails here.
+      /*
+       * A complete-looking record exists, but its contents do not match the
+       * checksum written with it.
+       *
+       * Never silently truncate genuine corruption.
+       */
       throw std::runtime_error("WAL corruption detected: CRC32 mismatch");
     }
 
     // ---------------------------------------------------------
-    // 9. RECORD IS VALID
+    // 10. VALIDATE SEQUENCE HISTORY
     // ---------------------------------------------------------
 
-    // now adding that struct to records vector
+    if (previous_sequence.has_value() && sequence <= *previous_sequence) {
+
+      throw std::runtime_error("WAL corruption detected: non-increasing "
+                               "sequence number; previous=" +
+                               std::to_string(*previous_sequence) +
+                               ", current=" + std::to_string(sequence));
+    }
+
+    /*
+     * UINT64_MAX cannot have a valid successor.
+     */
+    if (sequence == std::numeric_limits<uint64_t>::max()) {
+
+      throw std::overflow_error("WAL sequence space exhausted");
+    }
+
+    previous_sequence = sequence;
+
+    // ---------------------------------------------------------
+    // 11. VALID RECORD
+    // ---------------------------------------------------------
+
     records.push_back(
         RecoveredRecord{sequence, operation, std::move(key), std::move(value)});
 
-    // Restore next sequence number.
+    /*
+     * Restore the sequence allocator from the newest completely validated
+     * record.
+     */
     next_sequence_ = sequence + 1;
   }
 
-  // recover() moved the file cursor around.
-  // put() expects new records to be appended at the end.
+  /*
+   * Recovery moved the descriptor while reading.
+   *
+   * Future writes must append after the surviving WAL contents.
+   */
   if (::lseek(fd_, 0, SEEK_END) == -1) {
     throw std::runtime_error("Failed to seek to end of WAL after recovery");
   }
 
   return records;
+}
+
+void kronos::Wal::reclaimThrough(uint64_t checkpoint) {
+
+  /*
+   * The engine must serialize WAL reclamation against foreground writes.
+   *
+   * reclaimThrough() therefore assumes no concurrent put()/remove() is
+   * modifying this WAL while the rewrite is happening.
+   */
+
+  const uint64_t allocator_before_reclaim = next_sequence_;
+
+  /*
+   * Parse and validate the existing WAL.
+   *
+   * recover() also leaves the file descriptor positioned at the end.
+   */
+  const auto records = recover();
+
+  /*
+   * recover() derives next_sequence_ from the WAL itself.
+   *
+   * The MANIFEST may have previously raised the allocator beyond what the
+   * physical WAL alone can prove, so reclamation must never move the allocator
+   * backwards.
+   */
+  if (next_sequence_ < allocator_before_reclaim) {
+    next_sequence_ = allocator_before_reclaim;
+  }
+
+  std::filesystem::path temp_path = path_;
+  temp_path += ".tmp";
+
+  int temp_fd = ::open(temp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+  if (temp_fd == -1) {
+    throw std::runtime_error(
+        "Failed to create temporary WAL during reclamation");
+  }
+
+  auto write_all = [](int fd, const uint8_t *data, size_t size,
+                      const char *error_message) {
+    size_t total_written = 0;
+
+    while (total_written < size) {
+
+      ssize_t result = ::write(fd, data + total_written, size - total_written);
+
+      if (result == -1) {
+
+        if (errno == EINTR) {
+          continue;
+        }
+
+        throw std::runtime_error(error_message);
+      }
+
+      if (result == 0) {
+        throw std::runtime_error(error_message);
+      }
+
+      total_written += static_cast<size_t>(result);
+    }
+  };
+
+  try {
+
+    /*
+     * Every WAL, even an empty reclaimed WAL, still begins with its header.
+     */
+    write_all(temp_fd, reinterpret_cast<const uint8_t *>(magic_),
+              sizeof(magic_), "Failed to write reclaimed WAL magic");
+
+    write_all(temp_fd, reinterpret_cast<const uint8_t *>(&version_),
+              sizeof(version_), "Failed to write reclaimed WAL version");
+
+    /*
+     * Records <= checkpoint are already represented by authoritative
+     * SSTable state and may therefore be removed.
+     *
+     * Anything newer than the checkpoint must remain in the WAL.
+     */
+    for (const auto &record : records) {
+
+      if (record.sequence <= checkpoint) {
+        continue;
+      }
+
+      if (record.key.size() > std::numeric_limits<uint32_t>::max() ||
+          record.value.size() > std::numeric_limits<uint32_t>::max()) {
+
+        throw std::runtime_error(
+            "Recovered WAL record is too large to rewrite");
+      }
+
+      const uint32_t key_length = static_cast<uint32_t>(record.key.size());
+
+      const uint32_t value_length = static_cast<uint32_t>(record.value.size());
+
+      const uint8_t operation_byte = static_cast<uint8_t>(record.operation);
+
+      std::vector<uint8_t> serialized;
+
+      appendBytes(serialized, record.sequence);
+      appendBytes(serialized, operation_byte);
+      appendBytes(serialized, key_length);
+      appendBytes(serialized, value_length);
+
+      for (char c : record.key) {
+        serialized.push_back(static_cast<uint8_t>(c));
+      }
+
+      for (char c : record.value) {
+        serialized.push_back(static_cast<uint8_t>(c));
+      }
+
+      uLong crc = crc32(0L, Z_NULL, 0);
+
+      crc = crc32(crc, reinterpret_cast<const Bytef *>(serialized.data()),
+                  serialized.size());
+
+      const uint32_t checksum = static_cast<uint32_t>(crc);
+
+      appendBytes(serialized, checksum);
+
+      write_all(temp_fd, serialized.data(), serialized.size(),
+                "Failed to write reclaimed WAL record");
+    }
+
+    /*
+     * Make the replacement WAL durable before making it visible.
+     */
+    while (::fsync(temp_fd) == -1) {
+
+      if (errno == EINTR) {
+        continue;
+      }
+
+      throw std::runtime_error("Failed to fsync reclaimed WAL");
+    }
+
+    if (::close(temp_fd) == -1) {
+      temp_fd = -1;
+
+      throw std::runtime_error("Failed to close reclaimed WAL");
+    }
+
+    temp_fd = -1;
+
+    /*
+     * Atomic replacement:
+     *
+     * Before rename -> old WAL is authoritative.
+     * After rename  -> reclaimed WAL is authoritative.
+     *
+     * Both contain enough information for recovery because MANIFEST was
+     * checkpointed before reclamation was allowed to begin.
+     */
+    if (::rename(temp_path.c_str(), path_.c_str()) == -1) {
+
+      throw std::runtime_error("Failed to replace WAL during reclamation");
+    }
+
+    /*
+     * Open the newly-installed WAL before discarding the descriptor for
+     * the old inode.
+     */
+    int new_fd = ::open(path_.c_str(), O_RDWR);
+
+    if (new_fd == -1) {
+      throw std::runtime_error("Failed to reopen WAL after reclamation");
+    }
+
+    if (::lseek(new_fd, 0, SEEK_END) == -1) {
+
+      ::close(new_fd);
+
+      throw std::runtime_error("Failed to seek reclaimed WAL");
+    }
+
+    const int old_fd = fd_;
+
+    fd_ = new_fd;
+
+    if (old_fd != -1) {
+      ::close(old_fd);
+    }
+
+  } catch (...) {
+
+    if (temp_fd != -1) {
+      ::close(temp_fd);
+    }
+
+    std::error_code error;
+    std::filesystem::remove(temp_path, error);
+
+    throw;
+  }
+  /*
+   * The replacement WAL is already installed and fd_ now refers to it.
+   *
+   * Persist the rename itself. If directory fsync reports a genuine failure,
+   * subsequent engine operations will surface the maintenance error, while the
+   * Wal object still points at the correct current inode.
+   */
+  fsyncParentDirectory(path_);
 }

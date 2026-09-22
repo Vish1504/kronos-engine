@@ -68,6 +68,7 @@ add_executable(
     src/manifest.cpp
     src/compaction_policy.cpp
     src/engine.cpp
+    src/bench.cpp
 
     # Third-party hashing implementation used by BloomFilter
     src/third_party/murmurhash3/MurmurHash3.cpp
@@ -550,6 +551,42 @@ target_link_libraries(
 
     PRIVATE
 
+    ZLIB::ZLIB
+    Threads::Threads
+)
+
+# =========================================================
+# CHRONOS BENCHMARK
+# =========================================================
+
+add_executable(
+    chronos_bench
+
+    tools/chronos_bench.cpp
+
+    src/bench.cpp
+    src/engine.cpp
+    src/config.cpp
+    src/wal.cpp
+    src/memtable.cpp
+    src/sstable.cpp
+    src/bloom_filter.cpp
+    src/manifest.cpp
+    src/compactor.cpp
+    src/compaction_policy.cpp
+    src/third_party/murmurhash3/MurmurHash3.cpp
+)
+
+target_include_directories(
+    chronos_bench
+    PRIVATE
+    include
+    src
+)
+
+target_link_libraries(
+    chronos_bench
+    PRIVATE
     ZLIB::ZLIB
     Threads::Threads
 )

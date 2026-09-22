@@ -1,0 +1,3 @@
+KRONOS_MANIFEST_V2
+CHECKPOINT 99999
+0 "benchmark_db/L0-1.sst" "key_0" "key_99999"

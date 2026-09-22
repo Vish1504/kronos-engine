@@ -1,8 +1,9 @@
 
 
-#include <kronos/engine.hpp>
-
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <kronos/engine.hpp>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -552,6 +553,7 @@ void KronosEngine::flushMemtable(const std::shared_ptr<Memtable> &memtable) {
     std::lock_guard<std::mutex> manifest_lock(manifest_mutex_);
     manifest_.applyEdit(edit);
   }
+  flush_count_.fetch_add(1, std::memory_order_relaxed);
 
   /*
    * Only after the MANIFEST commit succeeds may this immutable Memtable
@@ -630,7 +632,7 @@ void KronosEngine::maybeCompact() {
   }
 
   const auto output_path = allocateSstablePath(plan->output_level);
-
+  const auto compaction_start = std::chrono::steady_clock::now();
   const auto result =
       compactor_.compact(input_paths, output_path, sstable_block_size_,
                          bloom_bits_per_key_, plan->can_drop_tombstones);
@@ -647,6 +649,16 @@ void KronosEngine::maybeCompact() {
     std::lock_guard<std::mutex> manifest_lock(manifest_mutex_);
     manifest_.applyEdit(edit);
   }
+
+  const auto compaction_end = std::chrono::steady_clock::now();
+
+  const auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      compaction_end - compaction_start);
+
+  compaction_count_.fetch_add(1, std::memory_order_relaxed);
+
+  total_compaction_time_ns_.fetch_add(duration.count(),
+                                      std::memory_order_relaxed);
 
   /*
    * Obsolete compaction inputs intentionally remain on disk. Module 9 will add
@@ -987,6 +999,24 @@ void KronosEngine::shutdown() {
   if (background_error) {
     std::rethrow_exception(background_error);
   }
+}
+
+EngineMetrics KronosEngine::getMetrics() const {
+  EngineMetrics metrics;
+
+  metrics.flush_count = flush_count_.load(std::memory_order_relaxed);
+
+  metrics.compaction_count = compaction_count_.load(std::memory_order_relaxed);
+
+  metrics.total_compaction_time = std::chrono::nanoseconds(
+      total_compaction_time_ns_.load(std::memory_order_relaxed));
+
+  {
+    std::lock_guard<std::mutex> manifest_lock(manifest_mutex_);
+    metrics.sstable_count = manifest_.liveFiles().size();
+  }
+
+  return metrics;
 }
 
 } // namespace kronos

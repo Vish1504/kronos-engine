@@ -19,8 +19,14 @@
 #include <kronos/thread_safe_queue.hpp>
 #include <kronos/types.hpp>
 #include <kronos/wal.hpp>
-
 namespace kronos {
+
+struct EngineMetrics {
+  size_t flush_count = 0;
+  size_t sstable_count = 0;
+  size_t compaction_count = 0;
+  std::chrono::nanoseconds total_compaction_time{0};
+};
 
 /*
  * KronosEngine
@@ -61,6 +67,7 @@ public:
   // drain the background queue, and join the worker thread.
   // Calling shutdown() more than once is safe.
   void shutdown();
+  EngineMetrics getMetrics() const;
 
 private:
   std::filesystem::path db_path_;
@@ -107,7 +114,7 @@ private:
 
   // Manifest is read by foreground GETs and edited by the maintenance worker.
   // Never hold manifest_mutex_ while performing expensive compaction I/O.
-  std::mutex manifest_mutex_;
+  mutable std::mutex manifest_mutex_;
 
   // Writers sleep here when an active Memtable needs rotation but the single
   // immutable slot is still occupied.
@@ -151,6 +158,10 @@ private:
   void rethrowBackgroundErrorLocked() const;
   // to validate an sstable
   void validateManifestSstables() const;
+
+  std::atomic<size_t> flush_count_{0};
+  std::atomic<size_t> compaction_count_{0};
+  std::atomic<int64_t> total_compaction_time_ns_{0};
 };
 
 } // namespace kronos
